@@ -7,6 +7,14 @@ import { prisma } from '@/lib/db/prisma';
  */
 export async function resetDatabase() {
   await prisma.auditLog.deleteMany();
+  await prisma.invoiceItem.deleteMany();
+  await prisma.invoice.deleteMany();
+  await prisma.invoiceSequence.deleteMany();
+  await prisma.orderItemModifier.deleteMany();
+  await prisma.orderItem.deleteMany();
+  await prisma.orderStatusHistory.deleteMany();
+  await prisma.orderPayment.deleteMany();
+  await prisma.order.deleteMany();
   await prisma.reservationStatusHistory.deleteMany();
   await prisma.reservationTable.deleteMany();
   await prisma.reservation.deleteMany();
