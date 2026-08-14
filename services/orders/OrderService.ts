@@ -127,6 +127,16 @@ export class OrderService {
       if (!customer) throw new NotFoundError('Customer account');
     }
 
+    // Same parse-and-validate pattern as ReservationService.resolveWindow's
+    // startAt — a loose string in, a real Date (or undefined) out.
+    let requiredAt: Date | undefined;
+    if (input.requiredAt) {
+      requiredAt = new Date(input.requiredAt);
+      if (Number.isNaN(requiredAt.getTime())) {
+        throw new ConflictError('requiredAt is not a valid date/time.');
+      }
+    }
+
     const resolvedItems = await this.resolveAndPriceItems(organizationId, input.items);
     const totals = this.computeOrderTotals(resolvedItems, input.discountAmount);
 
@@ -149,6 +159,7 @@ export class OrderService {
             reservationId: input.reservationId,
             deliveryAddress: input.deliveryAddress,
             notes: input.notes,
+            requiredAt,
             subtotal: totals.subtotal.toFixed(2),
             taxTotal: totals.taxTotal.toFixed(2),
             discountTotal: totals.discountTotal.toFixed(2),

@@ -31,6 +31,11 @@ export const createOrderSchema = z
     guestPhone: z.string().trim().max(30).optional(),
     notes: z.string().trim().max(500).optional(),
     discountAmount: moneyString.default('0.00'),
+    // Optional "have this ready by" time for the kitchen board (Phase 5).
+    // Loose string, parsed/validated as a real Date in OrderService — same
+    // pattern as ReservationService.resolveWindow's startAt. Omit for
+    // "as soon as possible" (the default for most walk-in orders).
+    requiredAt: z.string().trim().min(1).optional(),
     items: z.array(orderItemInputSchema).min(1, 'An order needs at least one item.'),
   })
   .refine((v) => v.type !== 'DELIVERY' || !!v.deliveryAddress, {
