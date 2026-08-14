@@ -31,6 +31,7 @@ export const PERMISSIONS = {
   TABLE_MANAGE: 'table:manage',
   MENU_VIEW: 'menu:view',
   MENU_MANAGE: 'menu:manage',
+  RESERVATION_VIEW: 'reservation:view',
   RESERVATION_MANAGE: 'reservation:manage',
   ORDER_MANAGE: 'order:manage',
   KITCHEN_VIEW: 'kitchen:view',
@@ -58,7 +59,8 @@ export const PERMISSION_CATALOG: Array<{ key: PermissionKey; description: string
   { key: PERMISSIONS.TABLE_MANAGE, description: 'Create/update tables, sections, and table status' },
   { key: PERMISSIONS.MENU_VIEW, description: 'View menu categories, items, and modifiers' },
   { key: PERMISSIONS.MENU_MANAGE, description: 'Create/update menu categories, items, variants, and modifiers' },
-  { key: PERMISSIONS.RESERVATION_MANAGE, description: 'Manage reservations (Phase 3)' },
+  { key: PERMISSIONS.RESERVATION_VIEW, description: 'View reservations and table availability' },
+  { key: PERMISSIONS.RESERVATION_MANAGE, description: 'Create/update/cancel reservations, record deposits' },
   { key: PERMISSIONS.ORDER_MANAGE, description: 'Manage orders (Phase 4)' },
   { key: PERMISSIONS.KITCHEN_VIEW, description: 'View kitchen display system (Phase 5)' },
   { key: PERMISSIONS.DELIVERY_MANAGE, description: 'Manage deliveries/drivers (Phase 6)' },
@@ -90,6 +92,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleNameLiteral, PermissionKey[]> 
     // mark a table cleaning) but do not edit the floor plan or menu pricing.
     PERMISSIONS.TABLE_MANAGE,
     PERMISSIONS.MENU_VIEW,
+    // Front-of-house staff take and manage reservations (phone bookings,
+    // walk-ins, seating, cancellations) as a core part of the job.
+    PERMISSIONS.RESERVATION_VIEW,
+    PERMISSIONS.RESERVATION_MANAGE,
   ],
   MANAGER: [
     PERMISSIONS.BRANCH_VIEW,
@@ -99,6 +105,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleNameLiteral, PermissionKey[]> 
     PERMISSIONS.TABLE_MANAGE,
     PERMISSIONS.MENU_VIEW,
     PERMISSIONS.MENU_MANAGE,
+    PERMISSIONS.RESERVATION_VIEW,
     PERMISSIONS.RESERVATION_MANAGE,
     PERMISSIONS.ORDER_MANAGE,
     PERMISSIONS.KITCHEN_VIEW,
