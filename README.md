@@ -7,11 +7,11 @@ platform. See `CLAUDE.md` for the full architecture/status record and `docs/arch
 **Status:** Phase 0 (discovery), Phase 1 (foundation: auth, RBAC, organizations, branches),
 Phase 2 (restaurant configuration: tables, sections, business hours, menu, modifiers), Phase 3
 (reservations: availability search, booking, deposits, status lifecycle, DB-enforced
-double-booking prevention), and Phase 4 (orders: dine-in/take-out/delivery, server-computed
-pricing, status lifecycle, manual payment recording, sequential invoicing) are implemented.
-Everything else (kitchen display, delivery dispatch, catering, CRM, inventory, accounting,
-reporting, analytics, AI, notifications) is not built yet — see `docs/architecture.md` for the
-phase order.
+double-booking prevention), Phase 4 (orders: dine-in/take-out/delivery, server-computed pricing,
+status lifecycle, manual payment recording, sequential invoicing), and Phase 5 (kitchen display:
+live ticket board, required-time tracking) are implemented. Everything else (delivery dispatch,
+catering, CRM, inventory, accounting, reporting, analytics, AI, notifications) is not built yet —
+see `docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or

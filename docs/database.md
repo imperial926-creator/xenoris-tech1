@@ -225,6 +225,26 @@ mechanism from the `EXCLUDE` constraint above, because "assign the next number, 
 duplicates" is a different guarantee than "reject an overlapping range"). Verified under genuine
 concurrent load — see `CLAUDE.md` → Known Issues.
 
+## Phase 5 Schema
+
+### Order.requiredAt (the only change)
+The master spec's Kitchen Display section lists no new tables — the kitchen dashboard is a view
+over the `Order`/`OrderItem` tree Phase 4 already built, not a parallel data model (see
+`docs/architecture.md` § 13 for the full reasoning). The single schema change is one nullable
+column: `Order.requiredAt DateTime?`, added via
+`prisma/migrations/20260814060000_phase5_kitchen_display/migration.sql`
+(`ALTER TABLE "orders" ADD COLUMN "requiredAt" TIMESTAMP(3);`). `NULL` means "as soon as
+possible" (the default for most walk-in orders); when set, it drives the kitchen board's overdue
+indicator only — it does not gate order creation or auto-cancel anything.
+
+Every other field the kitchen board displays already existed before this phase: order number is
+`Order.id`, items/quantities/modifiers come from `OrderItem`/`OrderItemModifier`, special
+instructions are `Order.notes` (order-level) and `OrderItem.notes` (per-line), table and order
+type are `Order.tableId`/`Order.table`/`Order.type`, and current status is `Order.status`. The
+kitchen "queue" itself is not a stored view or materialized table — it is
+`KitchenService.getQueue`'s query (`status IN ('PENDING','CONFIRMED','PREPARING','READY')`,
+ordered by `createdAt` ascending), computed fresh on every request.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their

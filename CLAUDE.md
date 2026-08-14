@@ -298,9 +298,52 @@ response. Financial and inventory calculations are never trusted from the client
   simultaneously (`Promise.allSettled`), asserting all 5 succeed with unique, correctly
   -sequential numbers.
 
-**Not yet built** (Phases 5–16 per `docs/architecture.md`): kitchen display, delivery,
-catering, CRM/RFM, inventory, accounting ledger, financial reporting, owner analytics, AI
-insights, notifications, hardening, deployment.
+**Phase 5 — Kitchen Display System: done.**
+- Prisma schema addition: one nullable column, `Order.requiredAt`, for the spec's "Required
+  time." **No new tables.** The master spec's Kitchen Display section (§20) asks for a dashboard
+  over the existing order lifecycle (NEW → ACCEPTED → PREPARING → READY), not a parallel data
+  model — that maps exactly onto the `OrderStatus` values `PENDING`/`CONFIRMED`/`PREPARING`/
+  `READY` Phase 4 already built and tested. A second `KitchenTicketStatus` enum kept in sync with
+  `OrderStatus` would be two sources of truth for one state machine; deliberately not built. See
+  the "Phase 5 — Kitchen Display System" comment block in `schema.prisma`.
+- `KitchenService` is intentionally thin: `getQueue` is a kitchen-shaped read model (active
+  tickets only — `PENDING`/`CONFIRMED`/`PREPARING`/`READY`, excludes `COMPLETED`/`CANCELLED`,
+  oldest first) and `advanceStatus` resolves "what's the next kitchen stage from here" and then
+  delegates the actual transition to `OrderService.updateStatus` — the legality of every
+  transition is checked exactly once, by `OrderService`'s own whitelist, never duplicated.
+- No new permissions needed: `kitchen:view` was already declared in the permission catalog back
+  in Phase 1 (as a forward-looking placeholder) and already granted to STAFF/MANAGER/OWNER/
+  ADMINISTRATOR — Phase 5 is the first phase to actually wire it into an authorization check (the
+  read-only queue endpoint). Advancing a ticket's status reuses `order:manage`, the same
+  permission the general order-status endpoint already required in Phase 4, since it's the same
+  underlying mutation.
+- API routes: `GET /api/branches/[id]/kitchen/queue` (kitchen:view) and
+  `POST /api/branches/[id]/kitchen/orders/[orderId]/advance` (order:manage).
+- Dashboard UI: a real kitchen board (`/dashboard/kitchen`) with one column per kitchen stage
+  (New/Accepted/Preparing/Ready), each ticket showing order number, type, table, items with
+  modifiers and per-item notes, order-level special-instruction notes, elapsed time since
+  creation, and an overdue indicator once `requiredAt` has passed — replacing the Phase 1
+  placeholder. Overview page gained a live "Kitchen Queue" card.
+- **Real-time updates are client-side polling, not push.** No WebSocket/Pusher/SSE infrastructure
+  is configured in this build — same "no fake integrations, report unconfigured honestly" rule
+  Deployment Rules already applies to payments/email/SMS/push. The kitchen board polls its queue
+  endpoint every 7 seconds, which is the practical option available without adding unconfigured
+  infrastructure; a real push channel (Server-Sent Events off the existing API routes, or a
+  managed pub/sub provider) is a reasonable future upgrade, not built here.
+- Seed data extended: two of Phase 4's existing seeded orders now carry a `requiredAt` (one 20
+  minutes overdue on a still-READY ticket, one 30 minutes out and on-time) so the kitchen board
+  has a meaningful overdue example without inventing new fake orders beyond what Phase 4 already
+  seeded.
+- Unit tests: `requiredAt` accepted/optional/rejected-when-empty on `createOrderSchema`.
+  Integration tests: queue filtering (active statuses only, tenant isolation, oldest-first
+  ordering), `advanceStatus` walking PENDING→CONFIRMED→PREPARING→READY one step at a time,
+  rejection of advancing an order already at READY or CANCELLED, tenant isolation on
+  `advanceStatus`, and `requiredAt` round-tripping through order creation into the queue read
+  model (plus `OrderService.createOrder` rejecting an unparseable `requiredAt` string).
+
+**Not yet built** (Phases 6–16 per `docs/architecture.md`): delivery, catering, CRM/RFM,
+inventory, accounting ledger, financial reporting, owner analytics, AI insights, notifications,
+hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -399,10 +442,52 @@ insights, notifications, hardening, deployment.
     that stale snapshot into the auto-seat logic — the same class of TOCTOU bug Phase 3 was careful
     to avoid for reservations. Fixed by re-reading the table's status *inside* the transaction
     (`tx.restaurantTable.findUniqueOrThrow`) immediately before deciding whether to transition it.
+  - Phase 5's schema change is small (one nullable column, no new tables — see the Phase 5 status
+    entry above for why), so its migration verification is proportionally lighter, but still real:
+    `prisma/migrations/20260814060000_phase5_kitchen_display/migration.sql` was hand-written and
+    applied clean to the same local Postgres instance (again after a mid-session `pg_ctlcluster`
+    restart — the cluster had stopped between turns; schema/data were verified intact first). A
+    3-assertion smoke test then verified `requiredAt` round-trips exactly with no truncation/
+    timezone drift, a null `requiredAt` is accepted (the "ASAP" default case), and a kitchen
+    -queue-shaped query (active statuses, correct branch) returns the expected row count. All
+    passed. The TypeScript syntax pass (see the compiler-version note below) confirmed Phase 5
+    introduced zero new diagnostic categories beyond the ones already present in the untouched
+    Phase 1-4 codebase under the same compiler version — a before/after diff, not a spot check.
 - Payment, email, SMS, push, storage, maps, and AI providers are all unconfigured placeholders —
   see `.env.example`. No fake integrations were built. `lib/payments/PaymentProvider.ts` (Phase 4)
   is the first of these interfaces actually written; the rest remain interface-less placeholders
   until their phase.
+- **The sandbox's global TypeScript compiler advanced versions between Phase 4 and Phase 5** (now
+  `6.0.3`), which changes the TS-syntax-check methodology described above in two ways worth
+  recording honestly rather than silently re-tuning the numbers:
+  1. `tsc --noEmit` now refuses to run at all against this repo's `tsconfig.json` (`TS5101`:
+     `baseUrl` is deprecated, exits before checking a single file) unless
+     `"ignoreDeprecations": "6.0"` is set. Added that key to `tsconfig.json` this phase — a real,
+     forward-compatible config fix (this is literally what the compiler's own error message
+     recommends), not a workaround specific to this sandbox.
+  2. With that unblocked, this compiler version surfaces several new diagnostic categories this
+     repo hadn't seen before — `TS7026` ("JSX element implicitly has type 'any'", because
+     `@types/react`'s `JSX.IntrinsicElements` can't resolve without `node_modules`) and `TS7006`
+     ("implicitly has an 'any' type", the same missing-types cascade landing on more call sites
+     under this version's inference). **These are not new bugs.** Proof: running this same
+     compiler against the Phase 1-4 code exactly as committed (`git stash -u`, i.e. before any
+     Phase 5 file existed) already produces 1,029 diagnostics in these exact categories
+     (`TS7026`: 679, `TS7006`: 190) on code that was fully hand-verified and shipped three phases
+     ago. Phase 5's own changes added 72 more diagnostics on top of that baseline — all in the
+     same already-established categories (new JSX in the kitchen board and page, new imports in
+     new files), zero new categories. The one genuinely new diagnostic Phase 5's first draft
+     introduced (`TS2322` on `components/kitchen/kitchen-board.tsx`, from extracting ticket
+     rendering into a separately-typed `TicketCard` component — passing `key` to a locally
+     -defined component hits the same "JSX.LibraryManagedAttributes needs @types/react"
+     resolution gap) was fixed by inlining that JSX at the call site instead, matching how every
+     other list in this codebase (`order-board.tsx`, `reservation-board.tsx`, etc.) already
+     renders — zero net new diagnostic categories introduced by Phase 5, confirmed by an explicit
+     before/after diff of the full compiler run, not just a spot check.
+  Bottom line: this is a real, non-cosmetic finding about the sandbox's evolving toolchain, worth
+  flagging so a future phase doesn't mistake a large error count for new breakage — it will
+  disappear entirely the moment `npm install` actually runs and `@types/react`/`@types/node`/
+  `@prisma/client`'s generated types exist. The `TS2307`/`TS2503`/`TS2882`/`TS2591` categories
+  from Phases 1-4 are unaffected in shape, just present in the same files as before.
 
 ## Required Environment Variables
 

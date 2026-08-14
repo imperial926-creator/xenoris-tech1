@@ -108,7 +108,7 @@ branch.
 2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers — **done**
 3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests — **done, this pass**
 4. Orders: dine-in, take-out, delivery, payments, invoices — **done, this pass**
-5. Kitchen display system
+5. Kitchen display system — **done, this pass**
 6. Delivery: zones, drivers, assignment, tracking
 7. Catering: inquiry → quote → accept → deposit → event → final payment
 8. CRM: profiles, history, RFM segmentation, lifetime value
@@ -288,3 +288,55 @@ rather than half-built:
 - **No refund-to-original-payment-method automation.** A `REFUNDED` `OrderPayment` row is a manual
   record (same as a `COMPLETED` one) — there is no gateway to actually reverse a charge through,
   since no gateway is connected yet.
+
+## 13. Phase 5 — Kitchen Display System
+
+The master spec's Kitchen Display section (§20) is short and deliberately so: "Create a kitchen
+dashboard" showing new orders, items, modifiers, special instructions, table/order type, required
+time, and current status, moving through NEW → ACCEPTED → PREPARING → READY. Notably, unlike every
+other phase's spec section, it lists **no new database tables**.
+
+The headline decision is to take that omission seriously rather than pattern-match "new phase, new
+tables." NEW/ACCEPTED/PREPARING/READY is not a new state machine — it is `OrderStatus`'s
+`PENDING`/`CONFIRMED`/`PREPARING`/`READY` values, the exact lifecycle Phase 4 already built,
+tested (including the full legal-transition-walk and illegal-transition-rejection tests), and
+shipped. `COMPLETED` (picked up/served) and `CANCELLED` remain whole-order/front-of-house
+concerns already handled by `OrderService` — the kitchen's job ends at `READY`. Building a second,
+parallel `KitchenTicketStatus` enum kept in sync with `OrderStatus` would create two sources of
+truth for one piece of business logic, the exact failure mode this codebase's Coding Conventions
+(`CLAUDE.md`) already warn against. So `KitchenService` does not own a state machine at all — it
+owns a read model (`getQueue`: active tickets, oldest first, kitchen-relevant fields only) and a
+one-line orchestration convenience (`advanceStatus`: "what's the next kitchen stage from here",
+then delegate the actual transition to `OrderService.updateStatus`, which re-validates it against
+its own whitelist regardless). The only genuinely new schema is `Order.requiredAt`, a nullable
+column for the spec's "Required time" — every other field the kitchen board needs (order number,
+items, modifiers, special instructions, table, order type, status) already existed on
+`Order`/`OrderItem` from Phase 4.
+
+This also settles the `kitchen:view` permission's status. It was declared in the permission
+catalog back in Phase 1 as a forward-looking placeholder (`PERMISSION_CATALOG`, granted to
+STAFF/MANAGER/OWNER/ADMINISTRATOR by `DEFAULT_ROLE_PERMISSIONS` from day one) but never wired into
+an actual authorization check until now — the read-only kitchen queue endpoint is gated by it.
+Advancing a ticket's status reuses `order:manage`, the same permission Phase 4's general
+order-status endpoint requires, since under the hood it is the same mutation
+(`OrderService.updateStatus`) either way; a narrower `kitchen:view`-only capability to *change*
+status was considered and rejected — a cook moving a ticket forward is exactly as privileged an
+action as a server changing an order's status from the Orders board, so gating it more loosely
+than that other entry point into the same state machine would be a real, exploitable inconsistency
+rather than a helpful narrowing.
+
+**"Use real-time updates where practical" is implemented as client-side polling, not push.** This
+build has no WebSocket, Server-Sent Events, or managed pub/sub provider (Pusher/Ably/etc.)
+configured — the same "report unconfigured honestly, don't fake it" rule already governing
+payments/email/SMS/push in the Deployment Rules section of `CLAUDE.md`. Standing up real push
+infrastructure is a legitimate provider decision (which service, what it costs, where webhooks
+land) that shouldn't be silently defaulted inside a phase whose actual scope is the kitchen
+workflow itself. Polling the queue endpoint every few seconds is the practical option available
+without adding unconfigured infrastructure, and it is genuinely adequate for a kitchen-line use
+case (staff are looking at a mounted screen, not waiting on sub-second latency) — flagged here as
+a known simplification, not hidden as if it were true push.
+
+Scope boundary: this phase is the kitchen-facing board only. It does not touch delivery dispatch
+(Phase 6, drivers/zones/assignment) or any customer-facing "your order is ready" notification
+(Phase 14, notifications) — both explicitly out of scope from the original Phase 4/5 kickoff and
+unaffected by anything built here.
