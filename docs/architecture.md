@@ -79,6 +79,14 @@ customer-facing `/orders`, `/reservations`, etc. `middleware.ts` already gates e
 architectural separation as the spec (dashboard components/services/APIs are still fully modular),
 just a corrected URL scheme.
 
+The same reasoning applies one level down to API routes for branch-scoped domains. Phase 1
+scaffolded a flat `app/api/reservations/` placeholder mirroring the spec's flat table list, but
+every reservation always belongs to exactly one branch (like tables), so Phase 3 nests it the same
+way tables already are: `app/api/branches/[id]/reservations/**`, not a flat `app/api/reservations/`.
+The flat placeholder was removed once the real, branch-scoped routes existed — org-scoped domains
+like menu correctly stay flat under `app/api/menu/**` (see § 10), since a menu isn't owned by one
+branch.
+
 ## 5. Technology Stack
 
 | Concern | Choice | Why |
@@ -97,8 +105,8 @@ just a corrected URL scheme.
 
 0. Discovery (this document) — **done**
 1. Foundation: Next.js/TS/Tailwind, Postgres/Prisma, auth, RBAC, organizations, branches — **done**
-2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers — **done, this pass**
-3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests
+2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers — **done**
+3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests — **done, this pass**
 4. Orders: dine-in, take-out, delivery, payments, invoices
 5. Kitchen display system
 6. Delivery: zones, drivers, assignment, tracking
@@ -168,3 +176,39 @@ alternatives: table status transitions are validated against a whitelist server-
 requesting `OUT_OF_SERVICE → OCCUPIED` directly is rejected, not silently allowed), and every
 money field uses Postgres `DECIMAL(10,2)` end to end — verified with a SQL smoke test proving no
 float drift (see `CLAUDE.md` → Known Issues).
+
+## 11. Phase 3 — Reservations
+
+Built on top of Phases 1/2: availability search, multi-table assignment (for parties larger than
+any single table), a reservation status state machine (same whitelist pattern as
+`TableService.ALLOWED_TRANSITIONS`, applied to `ReservationStatus`), manual deposit recording, and
+a soft business-hours check.
+
+The headline decision is where double-booking prevention actually lives. `ReservationService` does
+run an application-level availability check before creating a reservation — but that check has an
+inherent TOCTOU (time-of-check-to-time-of-use) race: two staff members could both pass the check a
+moment apart and both attempt to book the same table. The real guarantee is a Postgres `EXCLUDE`
+constraint (`no_double_booking`, using the `btree_gist` extension) declared directly on
+`reservation_tables` in hand-written migration SQL — Prisma's schema DSL cannot express EXCLUDE
+constraints, so this is intentionally invisible to `schema.prisma` itself (documented there and in
+`docs/database.md`). This constraint is what was actually verified under real concurrency: two
+separate `psql` processes racing to book the same table/window, with the loser rejected by
+Postgres mid-transaction — see `CLAUDE.md` → Known Issues for the full account. An automated
+Vitest test reproduces the same race at the service layer with `Promise.allSettled`.
+
+Two things were deliberately deferred rather than half-built:
+
+- **No separate guest/customer table.** `Reservation` stores a contact snapshot
+  (`guestName`/`guestEmail`/`guestPhone`) plus an optional `customerUserId` for registered
+  accounts. A real CRM `Customer` model with history, preferences, and RFM segmentation is Phase 8
+  — adding it now would mean either an empty table or a half-built CRM ahead of schedule.
+- **No payment gateway integration.** Deposits are staff-recorded attestations ("cash received,
+  confirmed by phone"), not real transactions. `lib/payments`'s `PaymentProvider` interface is
+  still unconfigured (see § 7 Risks) and reservation deposits will connect to a real ledger once
+  Phase 4 (order payments) and Phase 10 (accounting) exist.
+
+Scope is also deliberately staff-side only: the dashboard UI under `/dashboard/reservations` lets
+staff search availability and manage bookings, but public customer self-service booking is not
+built here. It needs customer-facing authentication, which doesn't exist yet — the current
+`/register` flow only creates organization-owner accounts — so it's bundled into Phase 4 alongside
+customer-facing ordering rather than building throwaway auth just for this phase.

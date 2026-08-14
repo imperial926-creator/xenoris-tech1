@@ -94,13 +94,56 @@ maxSelect` — name unique per org. `MenuModifier`: `id, modifierGroupId, name, 
 which modifier groups apply to which item — this is the literal `menu_item_modifiers` table from
 the spec, renamed for clarity since it links to groups, not individual modifiers directly.
 
+## Phase 3 Schema
+
+### Reservation / ReservationTable / ReservationStatusHistory
+Branch-scoped. `Reservation`: `id, organizationId, branchId, customerUserId?, guestName,
+guestEmail?, guestPhone?, startAt, endAt, guestCount, status (ReservationStatus), specialRequests?,
+occasion?, depositRequired, depositAmount? (Decimal), depositStatus
+(ReservationDepositStatus), depositNote?, cancellationReason?, cancelledAt?`. No separate
+`reservation_guests` table (guest contact is a snapshot directly on the reservation — full CRM
+guest profiles are Phase 8) and no separate `reservation_payments` table (deposits are recorded
+manually by staff, embedded as fields — a real payments ledger arrives with Phase 4/10). See the
+"Phase 3 — Reservations" comment block at the top of that section in `schema.prisma` for the full
+reasoning on both deviations.
+
+`ReservationTable` is the join table to `RestaurantTable`, supporting multi-table assignment for
+large parties. It **denormalizes** `startAt`, `endAt`, and `status` from the parent reservation —
+required so a Postgres `EXCLUDE` constraint can be declared directly on this table. `startAt`,
+`endAt`, `status` are kept in sync with the parent `Reservation` by `ReservationService` inside the
+same transaction; they are never written independently by any other code path.
+
+`ReservationStatusHistory` mirrors `TableStatusHistory`'s pattern exactly: append-only, one row per
+status change including the initial creation (`fromStatus = null`).
+
+`ReservationStatus` enum: `PENDING, CONFIRMED, SEATED, COMPLETED, CANCELLED, NO_SHOW`.
+`ReservationDepositStatus` enum: `NONE, PENDING, PAID, REFUNDED`. As with `TableStatus`, Postgres
+enums don't encode *which* transitions are legal — `ReservationService`'s status-transition
+whitelist does, server-side, before any status write happens.
+
+### Double-booking prevention (DB-enforced)
+`reservation_tables` carries a hand-written (not Prisma-DSL-expressible) constraint:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+ALTER TABLE reservation_tables ADD CONSTRAINT no_double_booking
+  EXCLUDE USING gist ("tableId" WITH =, tsrange("startAt", "endAt") WITH &&)
+  WHERE (status NOT IN ('CANCELLED', 'NO_SHOW'));
+```
+
+This rejects any two active bookings of the same table with overlapping `[startAt, endAt)` ranges
+— at the database level, so it holds even under a race condition or an application bug, not just
+when `ReservationService`'s own (also present, but not solely relied upon) availability check
+passes. Verified with a genuine two-process concurrent `psql` test, not just sequential assertions
+— see `CLAUDE.md` → Known Issues for the full transcript description. Because this constraint has
+no representation in `schema.prisma`, `prisma db pull` would not perfectly round-trip
+`reservation_tables` — noted here so that's understood as a deliberate, documented gap, not drift.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 3: `reservations`, `reservation_guests`, `reservation_tables`, `reservation_payments`,
-  `reservation_status_history`
 - Phase 4: `orders`, `order_items`, `order_item_modifiers`, `order_status_history`, `invoices`,
   `invoice_items`, `invoice_sequences`
 - Phase 6: `delivery_zones`, `delivery_orders`, `drivers`, `driver_assignments`,

@@ -172,9 +172,55 @@ response. Financial and inventory calculations are never trusted from the client
 - One real routing bug caught and fixed during Phase 1 while building this phase's nav: see
   `docs/architecture.md` § 4a.
 
-**Not yet built** (Phases 3–16 per `docs/architecture.md`): reservations, orders, kitchen display,
-delivery, catering, CRM/RFM, inventory, accounting ledger, financial reporting, owner analytics,
-AI insights, notifications, hardening, deployment.
+**Phase 3 — Reservations: done.**
+- Prisma schema additions: `Reservation`, `ReservationTable` (join table, denormalizes
+  `startAt`/`endAt`/`status` from the parent reservation), `ReservationStatusHistory`, plus
+  `ReservationStatus` and `ReservationDepositStatus` enums. No `reservation_guests` or
+  `reservation_payments` tables — guest contact info and deposit tracking are embedded directly on
+  `Reservation` instead (see `schema.prisma`'s "Phase 3 — Reservations" comment block and
+  `docs/database.md` for the full reasoning).
+- **Double-booking prevention is enforced by Postgres itself**, not just application logic: a
+  `btree_gist`-backed `EXCLUDE` constraint (`no_double_booking`) on `reservation_tables` rejects
+  any two non-cancelled/no-show bookings of the same table with overlapping time ranges — hand
+  -written in migration SQL since Prisma's schema DSL has no EXCLUDE support. Proven with a real
+  two-session concurrent `psql` test (not just sequential assertions) — see Known Issues below.
+- Permissions: `reservation:view`, `reservation:manage`, granted to STAFF/MANAGER by default
+  (front-of-house staff take and manage reservations as a core part of the job, unlike table/menu
+  editing).
+- `ReservationService`: availability search (mirrors the DB constraint's overlap logic exactly),
+  reservation creation with multi-table assignment and capacity validation, a whitelisted status
+  state machine (`PENDING → CONFIRMED → SEATED → COMPLETED`, with `CANCELLED`/`NO_SHOW` branches;
+  same "reject illegal transitions server-side" pattern as `TableService`), manual deposit
+  recording (no payment gateway exists yet — staff attest money changed hands outside the system),
+  and a soft business-hours check against `Branch.openingHours` using `Intl.DateTimeFormat`
+  (no date library dependency, since this build environment cannot `npm install` one to verify it
+  works).
+- API routes under `/api/branches/[id]/reservations` (+ `/availability`, `/[reservationId]`,
+  `/[reservationId]/status`, `/[reservationId]/deposit`, `/[reservationId]/status-history`).
+- Dashboard UI: an availability search + booking form (pick a date/time/party size, select one or
+  more tables, capture guest details and an optional deposit) and a reservation list with
+  status-appropriate action buttons (Confirm/Seat/Complete/Cancel/No-show) and inline deposit
+  recording, replacing the Phase 2 placeholder. Overview page gained a live "Reservations Today"
+  card.
+- Scope boundary: **staff-side dashboard only.** Public customer self-service booking needs
+  customer-facing authentication, which doesn't exist yet (the current `/register` flow only
+  creates org-owner accounts) — deferred to Phase 4 alongside customer ordering rather than
+  building throwaway auth here.
+- Seed data extended: 7 demo reservations spanning every status (PENDING, CONFIRMED w/ paid
+  deposit, SEATED, COMPLETED, CANCELLED, NO_SHOW) across both branches, using offsets from seed
+  time so PENDING/CONFIRMED are always in the future and terminal statuses are always in the past.
+- Unit tests: reservation validation schemas (duration bounds, deposit-required-implies-amount,
+  status enums). Integration tests: availability search (overlap + non-overlap), capacity
+  validation, the full legal status lifecycle, illegal-transition rejection, cancellation
+  -reason-required, cancellation freeing a table for rebooking, tenant isolation, manual deposit
+  recording, and — the one genuinely new kind of test in this codebase — a **real concurrent
+  double-booking test** using `Promise.allSettled` on two simultaneous `createReservation` calls
+  for the same table/window, asserting exactly one succeeds and the loser fails with the DB's
+  `ConflictError`, not a sequential simulation of concurrency.
+
+**Not yet built** (Phases 4–16 per `docs/architecture.md`): orders, kitchen display, delivery,
+catering, CRM/RFM, inventory, accounting ledger, financial reporting, owner analytics, AI
+insights, notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -224,6 +270,27 @@ AI insights, notifications, hardening, deployment.
     one more instance of the same `any`-through-generic-inference quirk as the Phase 1 `roles`
     fix (this time in `prisma/seed.ts`'s `categoryByName` map) — fixed the same way, with an
     explicit type annotation instead of relying on inference.
+  - Phase 3 went further than a sequential smoke test: after hand-writing and applying
+    `prisma/migrations/20260814040000_phase3_reservations/migration.sql` (including
+    `CREATE EXTENSION IF NOT EXISTS btree_gist;` and the `no_double_booking` EXCLUDE constraint)
+    to the same local Postgres instance, a 7-assertion sequential smoke test verified the basics
+    (overlap rejection, back-to-back non-overlap acceptance, cancelled rows not blocking rebooking,
+    the constraint being per-table not global, exact `DECIMAL(10,2)` deposit storage, and cascade
+    deletes). Then a **genuine concurrency test** ran two separate `psql` processes as real
+    concurrent OS processes: session A opened a transaction, inserted a booking, and held it open
+    with `pg_sleep(4)`; session B, started ~1s later, attempted an overlapping booking on the same
+    table as a plain auto-commit statement. Session B's `INSERT` blocked for ~3 seconds (visibly
+    waiting on session A's uncommitted row via Postgres' own locking, not a bug), then failed with
+    `ERROR: conflicting key value violates exclusion constraint "no_double_booking"` the instant
+    session A committed — confirmed via each session's captured log output and a final query
+    showing only session A's row exists. This is a materially stronger proof than a sequential
+    "call twice, expect the second to fail" test: it demonstrates the guarantee holds under an
+    actual race, not just repeated single-threaded calls. The same guarantee is also exercised as
+    an automated Vitest integration test
+    (`tests/integration/reservations/reservation-service.test.ts`, "prevents a genuine concurrent
+    double-booking...") using `Promise.allSettled` on two simultaneous service calls — authored and
+    TS-syntax-checked here, not yet runtime-executed for the same `npm install` reason as every
+    other test in this repo (see below).
 - Payment, email, SMS, push, storage, maps, and AI providers are all unconfigured placeholders —
   see `.env.example`. No fake integrations were built.
 

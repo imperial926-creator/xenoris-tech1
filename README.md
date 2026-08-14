@@ -4,11 +4,12 @@ Production restaurant management, booking, catering, ordering, CRM & financial i
 platform. See `CLAUDE.md` for the full architecture/status record and `docs/architecture.md` /
 `docs/database.md` for details. This README covers local setup only.
 
-**Status:** Phase 0 (discovery), Phase 1 (foundation: auth, RBAC, organizations, branches), and
-Phase 2 (restaurant configuration: tables, sections, business hours, menu, modifiers) are
-implemented. Everything else (reservations, orders, kitchen, delivery, catering, CRM, inventory,
-accounting, reporting, analytics, AI, notifications) is not built yet — see `docs/architecture.md`
-for the phase order.
+**Status:** Phase 0 (discovery), Phase 1 (foundation: auth, RBAC, organizations, branches),
+Phase 2 (restaurant configuration: tables, sections, business hours, menu, modifiers), and Phase 3
+(reservations: availability search, booking, deposits, status lifecycle, DB-enforced
+double-booking prevention) are implemented. Everything else (orders, kitchen, delivery, catering,
+CRM, inventory, accounting, reporting, analytics, AI, notifications) is not built yet — see
+`docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or
@@ -53,9 +54,11 @@ npm run db:seed
 ```
 
 This creates one demo organization ("[DEMO] Manila Grill House"), two branches, one user per
-role, 24 tables across 2 sections per branch, and a starter menu (4 categories, 14 items, a
-variant, and 2 modifier groups). Credentials are printed to the console when the seed script
-runs — see `prisma/seed.ts`. All seeded records are clearly prefixed `[DEMO]` and use `*.local`
+role, 24 tables across 2 sections per branch, a starter menu (4 categories, 14 items, a variant,
+and 2 modifier groups), and 7 sample reservations spanning every status (pending, confirmed with a
+paid deposit, seated, completed, cancelled, no-show). Credentials are printed to the console when
+the seed script runs — see `prisma/seed.ts`. All seeded records are clearly prefixed `[DEMO]` and
+use `*.local`
 email addresses.
 
 ## Start the development server
