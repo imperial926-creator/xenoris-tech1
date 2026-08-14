@@ -341,9 +341,76 @@ response. Financial and inventory calculations are never trusted from the client
   `advanceStatus`, and `requiredAt` round-tripping through order creation into the queue read
   model (plus `OrderService.createOrder` rejecting an unparseable `requiredAt` string).
 
-**Not yet built** (Phases 6–16 per `docs/architecture.md`): delivery, catering, CRM/RFM,
-inventory, accounting ledger, financial reporting, owner analytics, AI insights, notifications,
-hardening, deployment.
+**Phase 6 — Delivery: done.**
+- Prisma schema additions: `Order.deliveryFee` (so a delivery's fee is actually part of what the
+  customer is charged — folded into `Order.total` via a modified `computeOrderTotals`, not just
+  decorative data on a side table), plus five new tables — `DeliveryZone`, `Driver`,
+  `DeliveryOrder`, `DeliveryStatusHistory`, `DriverAssignment` — and a new `DeliveryStatus` enum.
+  See the "Phase 6 — Delivery" comment block in `schema.prisma` for the five numbered design
+  decisions in full; the short version: `DeliveryOrder` is a 1:1 companion table to `Order` (per
+  master spec §18's explicit `delivery_orders` table), auto-created in the same transaction as
+  order creation whenever `type === 'DELIVERY'`; dispatch progress gets its own `DeliveryStatus`
+  state machine, deliberately **not** merged with `OrderStatus` (contrast with Phase 5's KDS,
+  which deliberately *does* reuse `OrderStatus` — dispatch and kitchen progress are genuinely
+  different axes); `Driver` is a separate operational profile table, not just the DRIVER role
+  ("role grants capability, profile carries domain data" — the same split Order/Reservation use
+  for `customerUserId`); `DriverAssignment` is an append-only audit trail, separate from
+  `DeliveryOrder.driverId`'s current-value pointer, same pattern as `TableStatusHistory`/
+  `OrderStatusHistory`.
+- `DeliveryZoneService`/`DriverService`/`DeliveryService` follow the same
+  service-layer-owns-the-transaction, `assertBranchInOrg`-gated, audit-logged pattern as every
+  prior phase. `DeliveryService`'s status whitelist (`ALLOWED_TRANSITIONS`) requires a driver
+  assigned before `PICKED_UP` and a `note` before `CANCELLED`/`FAILED`; `assignDriver` closes out
+  any currently-open `DriverAssignment` and opens a new one inside the same transaction, so
+  reassignment always leaves exactly one open assignment row.
+- **Driver-scoped access control (master spec §19):** a dedicated, non-branch-nested
+  `GET /api/deliveries/mine` endpoint derives `organizationId`/`userId` only from the session,
+  never from client-supplied params, and `DeliveryService.myDeliveries` resolves the caller's own
+  `Driver` profile via `DriverService.getByUserId` before filtering — a driver cannot see another
+  driver's queue by guessing an ID.
+- Permissions: no new permission key — `delivery:manage` already existed in Phase 1's
+  forward-looking catalog and is reused for both the staff-facing board (branch-nested routes)
+  and the driver-facing `/mine` route. Added to STAFF's default grants (previously only
+  MANAGER/DRIVER/OWNER/ADMINISTRATOR had it) — someone has to dispatch a ready delivery to a
+  driver, same reasoning already applied to `order:manage`.
+- API routes: `/api/branches/[id]/delivery-zones` (+ `/[zoneId]`), `/api/branches/[id]/drivers`
+  (+ `/[driverId]`, `/eligible-users`), `/api/branches/[id]/deliveries` (+ `/[deliveryId]`,
+  `/assign`, `/status`, `/status-history`), and the top-level `/api/deliveries/mine`.
+  `drivers/eligible-users` is deliberately narrow — DRIVER-role users without a profile yet, just
+  enough to populate a picker — **not** a general user-directory endpoint (`user:view`'s real
+  implementation is still Phase 1's unimplemented placeholder).
+- Dashboard UI: a staff-facing Delivery board (`/dashboard/delivery` — zones, driver profiles,
+  and a dispatch queue with assign/status actions) and a driver-facing My Deliveries page
+  (`/dashboard/my-deliveries` — only the calling driver's own assigned/history deliveries, a
+  payment-status readout computed from `order.payments`, and a plain
+  `https://maps.google.com/?q=<address>` link — not an integrated routing feature, just a deep
+  link, since no maps/geocoding API is configured). Overview page gained a live "Active
+  Deliveries" card.
+- **No fake integrations, again:** delivery zones are plain staff-defined named areas, not
+  geofenced (no maps API configured); proof of delivery is a staff/driver-entered text note plus
+  optional recipient name, not a photo (no object storage configured) — both called out explicitly
+  in code comments rather than half-built.
+- Seed data extended: three delivery zones across both branches, one `Driver` profile linked to
+  the existing `driver@restaurant-platform.local` demo user, and Phase 4's existing
+  'delivery-preparing' seed order retrofitted with a real zone/fee (bumping its total from
+  308.00 to 358.00) plus a full `DeliveryOrder`/`DeliveryStatusHistory`/`DriverAssignment` trail
+  showing it as dispatched (`ASSIGNED`). The order-total backfill is guarded on `deliveryFee`
+  still being `0` so re-running `prisma db seed` stays idempotent rather than re-adding the fee
+  on every run.
+- Unit tests: every `lib/validation/delivery.ts` schema (zone/driver/assign/status-update/list
+  query — defaults, required fields, enum whitelists, malformed money). Integration tests:
+  `DeliveryZoneService`/`DriverService` CRUD + tenant isolation + duplicate-name/duplicate-profile
+  rejection; `DeliveryOrder` auto-creation on `OrderService.createOrder` with an **exact Decimal
+  assertion** that the zone fee flows into `Order.total` (150.00 subtotal + 18.00 VAT + 50.00
+  delivery fee = 218.00, mirroring the migration smoke test's worked example); driver
+  assign/reassign leaving exactly one open `DriverAssignment`; the full status whitelist
+  (legal/illegal transitions, `note`-required-for-CANCELLED/FAILED, `driverId`-required-for-
+  PICKED_UP); and `myDeliveries` returning only the calling driver's own deliveries, including
+  across organizations.
+
+**Not yet built** (Phases 7–16 per `docs/architecture.md`): catering, CRM/RFM, inventory,
+accounting ledger, financial reporting, owner analytics, AI insights, notifications, hardening,
+deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -453,6 +520,18 @@ hardening, deployment.
     passed. The TypeScript syntax pass (see the compiler-version note below) confirmed Phase 5
     introduced zero new diagnostic categories beyond the ones already present in the untouched
     Phase 1-4 codebase under the same compiler version — a before/after diff, not a spot check.
+  - Phase 6's migration (`prisma/migrations/20260814070000_phase6_delivery/migration.sql`) adds
+    one column to `orders` and five new tables; hand-written and applied clean to both the dev and
+    test local Postgres databases. A 5-assertion smoke test verified: order total correctly
+    includes `deliveryFee` (228.00, exact); a duplicate `DeliveryOrder.orderId` is rejected by the
+    unique constraint; deleting a referenced `DeliveryZone` is blocked (`ON DELETE RESTRICT`);
+    driver reassignment leaves exactly one open `DriverAssignment` row; and cascading delete from
+    `orders` removes the dependent `delivery_orders`/`delivery_status_history`/
+    `driver_assignments` rows. All passed. The `git stash -u` before/after TypeScript diff (see
+    below) confirmed the same result as Phase 5: zero new diagnostic categories, all growth inside
+    already-established ones — including 3 new `TS2882` instances (missing type declarations for
+    `import 'server-only'`), the identical pattern every other service file in this codebase
+    already hits, not a new failure mode.
 - Payment, email, SMS, push, storage, maps, and AI providers are all unconfigured placeholders —
   see `.env.example`. No fake integrations were built. `lib/payments/PaymentProvider.ts` (Phase 4)
   is the first of these interfaces actually written; the rest remain interface-less placeholders
@@ -488,6 +567,16 @@ hardening, deployment.
   disappear entirely the moment `npm install` actually runs and `@types/react`/`@types/node`/
   `@prisma/client`'s generated types exist. The `TS2307`/`TS2503`/`TS2882`/`TS2591` categories
   from Phases 1-4 are unaffected in shape, just present in the same files as before.
+  Phase 6 re-ran this same `git stash -u` before/after diff (now the standard verification step
+  for every phase, per Phase 5's note above): baseline (Phase 1-5 code, this compiler) was 1,101
+  diagnostics (`TS7026`: 743, `TS7006`: 192, `TS2307`: 112, `TS2503`: 14, `TS2882`: 13, `TS7031`:
+  12, `TS2591`: 11, `TS7053`: 2, `TS2345`: 1, `TS18046`: 1 — matching exactly the expected
+  1,029 + 72 from Phase 5's own diff, a useful cross-check that the methodology itself is sound).
+  After Phase 6: 1,297 diagnostics — 196 more, entirely inside `TS7026` (+138), `TS7006` (+36),
+  `TS2307` (+19), and `TS2882` (+3, the three new `server-only` imports noted above). Zero new
+  categories. No `TS2322` key-prop diagnostic appeared this phase — both new list renders
+  (`delivery-board.tsx`, `my-deliveries.tsx`) render their `.map()` rows inline rather than
+  extracting a separately-typed child component, avoiding the Phase 5 pitfall from the start.
 
 ## Required Environment Variables
 

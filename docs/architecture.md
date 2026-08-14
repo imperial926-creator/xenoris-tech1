@@ -106,10 +106,10 @@ branch.
 0. Discovery (this document) — **done**
 1. Foundation: Next.js/TS/Tailwind, Postgres/Prisma, auth, RBAC, organizations, branches — **done**
 2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers — **done**
-3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests — **done, this pass**
-4. Orders: dine-in, take-out, delivery, payments, invoices — **done, this pass**
-5. Kitchen display system — **done, this pass**
-6. Delivery: zones, drivers, assignment, tracking
+3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests — **done**
+4. Orders: dine-in, take-out, delivery, payments, invoices — **done**
+5. Kitchen display system — **done**
+6. Delivery: zones, drivers, assignment, tracking — **done, this pass**
 7. Catering: inquiry → quote → accept → deposit → event → final payment
 8. CRM: profiles, history, RFM segmentation, lifetime value
 9. Inventory: ingredients, recipes, purchasing, stock, waste, COGS integration
@@ -340,3 +340,68 @@ Scope boundary: this phase is the kitchen-facing board only. It does not touch d
 (Phase 6, drivers/zones/assignment) or any customer-facing "your order is ready" notification
 (Phase 14, notifications) — both explicitly out of scope from the original Phase 4/5 kickoff and
 unaffected by anything built here.
+
+## 14. Phase 6 — Delivery
+
+Master spec §18-19 asks for delivery zones, driver assignment/tracking, delivery status, proof of
+delivery, and a driver-scoped view restricted to "deliveries they are authorized to access." Unlike
+Phase 5, this section of the spec *does* name new tables (`delivery_orders` explicitly), and unlike
+Phase 5's reuse of `OrderStatus`, dispatch progress genuinely is a second axis, not the same one
+relabeled: a driver can be `ASSIGNED` and en route to the restaurant while the kitchen is still
+`PREPARING`, and a delivery can be `DELIVERED` while the parent order is still open for a
+follow-up. Two real axes get two real state machines — `DeliveryStatus` is its own enum with its
+own whitelist in `DeliveryService`, and `DeliveryService` never writes `Order.status` (nor does
+`OrderService` ever write `DeliveryOrder.status`). Whether a delivered order should
+auto-complete the parent `Order` was considered and deliberately left as a manual staff/manager
+decision rather than an automatic side effect — a debatable business call better made by the
+restaurant than baked into the platform silently.
+
+`DeliveryOrder` is a 1:1 companion table to `Order` (a nullable `Order.delivery` relation backed
+by a `@unique orderId` foreign key), not a set of nullable columns bolted directly onto `Order` —
+the alternative would permanently block dine-in/take-out rows with always-null delivery columns.
+It is created inside the *same transaction* as the parent `Order` whenever `type === 'DELIVERY'`,
+so an order and its delivery record can never exist independently of each other. The one
+deliberate exception to "delivery data lives on `DeliveryOrder`" is `deliveryFee`, which is
+snapshotted onto `Order` itself as well — not because of denormalization for its own sake, but
+because `Order.total` (and therefore every payment/invoice calculation downstream) has to include
+it, and requiring every reader to join to `DeliveryOrder` just to compute a correct total would be
+a real correctness footgun. Both fields are written atomically in the same transaction from the
+same snapshot value, so this is one source of truth captured twice, not two sources of truth.
+
+`Driver` is a separate profile table from `User`+the `DRIVER` role, carrying operational fields
+(vehicle type/plate, phone, active) that have no reason to live on the authentication/RBAC side of
+the system — the same "role grants capability, profile carries domain data" split `Order` and
+`Reservation` already use for their optional `customerUserId`. A user can hold the `DRIVER` role
+without yet having a `Driver` profile (a manager grants the role, then separately creates the
+profile), which is exactly what `DriverService.listEligibleUsers` exists to support — deliberately
+narrow (DRIVER-role users without a profile yet, nothing more) rather than a general staff
+directory, since full `user:view` implementation is still Phase 1's unimplemented placeholder.
+
+`DriverAssignment` is an append-only audit trail, kept separate from both `DeliveryOrder.driverId`
+(the current-value pointer used for everyday queries) and `DeliveryStatusHistory` (the status
+timeline) — reassignment is its own timestamped event (`assignedAt`/`unassignedAt`) worth its own
+record, the same "denormalized current value + full history table" pattern `TableStatusHistory`
+and `OrderStatusHistory` already established, just as its own table rather than folded into the
+status history because a driver reassignment is a materially different kind of event from a status
+transition.
+
+Master spec §19's "drivers must only see deliveries they are authorized to access" is enforced
+structurally, not just by a query filter a client could omit: `GET /api/deliveries/mine` is a
+dedicated, non-branch-nested route whose only inputs are session-derived (`organizationId`,
+`userId` — never a client-supplied driver ID), and `DeliveryService.myDeliveries` resolves the
+caller's own `Driver` profile via `DriverService.getByUserId` before it will filter anything. A
+driver cannot request another driver's queue by guessing or supplying an ID, because no endpoint
+ever accepts one from a driver-facing caller.
+
+**No fake integrations, once again.** A `DeliveryZone` is a plain staff-named area with a flat fee
+— there is no geofencing, address validation, or maps/geocoding API configured, so zones are not
+automatically derived from an address. Proof of delivery is a staff/driver-entered text note plus
+an optional recipient name, not a photo — no object storage provider is configured. The driver
+UI's "navigation" affordance is a plain `https://maps.google.com/?q=<address>` deep link to an
+external maps app, explicitly commented as such in the code — not an integrated routing/ETA
+feature, which would require a real maps API key this build does not have.
+
+Scope boundary: this phase is dispatch and driver-facing status/tracking only. It does not touch
+customer-facing delivery tracking (a customer-visible "where's my order" view is a reasonable
+future feature building on the same `DeliveryOrder` data, not built here) or any SMS/push
+"your driver is on the way" notification (Phase 14).

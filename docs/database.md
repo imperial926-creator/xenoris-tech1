@@ -245,13 +245,68 @@ kitchen "queue" itself is not a stored view or materialized table — it is
 `KitchenService.getQueue`'s query (`status IN ('PENDING','CONFIRMED','PREPARING','READY')`,
 ordered by `createdAt` ascending), computed fresh on every request.
 
+## Phase 6 Schema
+
+### Order.deliveryFee (the one change to an existing table)
+`Order` gains one column: `deliveryFee Decimal @default(0) @db.Decimal(10, 2)`. This is
+deliberately **not** the only place a delivery's fee is stored (`DeliveryOrder.deliveryFee` below
+is a second copy) — it exists so `Order.total` (and every payment/invoice calculation that reads
+it) is correct without joining to `DeliveryOrder`. Both copies are written from the same snapshot,
+in the same transaction, at order-creation time — one value, captured twice, not two sources of
+truth. See `docs/architecture.md` § 14 for the full reasoning.
+
+### DeliveryZone
+`id, organizationId, branchId, name, description?, deliveryFee (Decimal), active (default true)`.
+`@@unique([branchId, name])` — zone names are unique per branch, not globally, mirroring
+`TableSection`'s `@@unique([branchId, name])`. A plain staff-defined named area with a flat fee;
+no geofencing or address-derived boundaries (no maps API configured).
+
+### Driver
+`id, organizationId, branchId, userId (@unique, FK to User, ON DELETE CASCADE), vehicleType?,
+vehiclePlate?, phone?, active (default true)`. Separate from the `DRIVER` role — a user can hold
+the role without yet having a profile. `userId` is unique: at most one `Driver` profile per user,
+enforced at the DB level, not just in `DriverService.create`'s pre-check (which exists for a
+friendlier error message; the constraint is the actual guarantee under a race).
+
+### DeliveryOrder
+`id, organizationId, branchId, orderId (@unique, FK to Order, ON DELETE CASCADE), deliveryZoneId?
+(FK to DeliveryZone, ON DELETE RESTRICT), driverId? (FK to Driver, ON DELETE SET NULL), status
+(DeliveryStatus), deliveryFee (Decimal), estimatedDeliveryAt?, pickedUpAt?, deliveredAt?,
+proofOfDeliveryNote?, recipientName?`. The `@unique orderId` makes this a true 1:1 companion table
+to `Order`, per master spec §18's explicit `delivery_orders` table — not fields merged onto
+`Order` directly, which would leave dine-in/take-out rows with permanently-null delivery columns.
+Created inside the same transaction as its parent `Order` whenever `type === 'DELIVERY'`
+(`OrderService.createOrder`), so the two rows can never exist independently. The zone FK is
+`RESTRICT` (a zone that has ever been used by a delivery cannot be deleted — deactivate it
+instead, same "soft-delete over hard-delete" pattern as the menu); the driver FK is `SET NULL`
+(unassigning a driver, or removing their profile, should not destroy delivery history).
+
+`DeliveryStatus` enum: `UNASSIGNED, ASSIGNED, PICKED_UP, DELIVERED, FAILED, CANCELLED` — its own
+state machine, deliberately not merged with `OrderStatus` (dispatch progress and kitchen progress
+are different axes; see `docs/architecture.md` § 14). Legal transitions are whitelisted in
+`DeliveryService.ALLOWED_TRANSITIONS`, the same pattern as every other status enum in this
+codebase.
+
+### DeliveryStatusHistory
+`id, deliveryOrderId, fromStatus? (DeliveryStatus), toStatus (DeliveryStatus), changedByUserId?,
+note?`. Append-only, one row per status change including creation (`fromStatus = null`) — the same
+`*StatusHistory` pattern as `TableStatusHistory`/`ReservationStatusHistory`/`OrderStatusHistory`.
+
+### DriverAssignment
+`id, deliveryOrderId, driverId, assignedByUserId?, assignedAt (default now), unassignedAt?,
+note?`. Append-only audit trail of *who was assigned when*, kept separate from both
+`DeliveryOrder.driverId` (the current-value pointer used for everyday queries) and
+`DeliveryStatusHistory` (the status timeline) — reassignment is its own timestamped event, not
+just a status change or a value overwrite. `DeliveryService.assignDriver` closes out any row with
+`unassignedAt: null` for the delivery before opening a new one, inside the same transaction, so at
+most one row per `DeliveryOrder` is ever open at a time — verified by the migration smoke test and
+an integration test asserting exactly one open assignment after a reassignment.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 6: `delivery_zones`, `delivery_orders`, `drivers`, `driver_assignments`,
-  `delivery_status_history`
 - Phase 7: `catering_inquiries`, `catering_packages`, `catering_quotes`, `catering_quote_items`,
   `catering_events`, `catering_event_items`, `catering_payments`
 - Phase 8: `customers`, `customer_addresses`, `customer_preferences`, `customer_notes`,
