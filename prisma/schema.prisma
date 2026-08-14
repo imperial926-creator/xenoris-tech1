@@ -37,6 +37,8 @@ model Organization {
   menuItems          MenuItem[]
   menuModifierGroups MenuModifierGroup[]
   reservations       Reservation[]
+  orders             Order[]
+  invoices           Invoice[]
 
   @@map("organizations")
 }
@@ -66,6 +68,9 @@ model Branch {
   tableSections TableSection[]
   tables        RestaurantTable[]
   reservations  Reservation[]
+  orders        Order[]
+  invoices      Invoice[]
+  invoiceSequence InvoiceSequence?
 
   @@index([organizationId])
   @@map("branches")
@@ -102,6 +107,7 @@ model User {
   // side — walk-in/phone bookings have no registered user at all (Phase 8
   // full CRM identity is a later phase; this is just "was there an account").
   reservations Reservation[]
+  orders       Order[]
 
   // Email is unique per organization, not globally — the same person may be a
   // customer of multiple independent restaurant organizations on the platform.
@@ -266,6 +272,7 @@ model RestaurantTable {
   section       TableSection?        @relation(fields: [sectionId], references: [id], onDelete: SetNull)
   statusHistory TableStatusHistory[]
   reservationTables ReservationTable[]
+  orders        Order[]
 
   // Table numbers only need to be unique within a branch, not globally —
   // two branches can both have a "Table 1".
@@ -357,6 +364,7 @@ model MenuModifier {
   updatedAt       DateTime @updatedAt
 
   modifierGroup MenuModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  orderItemModifiers OrderItemModifier[]
 
   @@unique([modifierGroupId, name])
   @@index([modifierGroupId])
@@ -386,6 +394,7 @@ model MenuItem {
   category     MenuCategory            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   variants     MenuItemVariant[]
   modifierGroups MenuItemModifierGroup[]
+  orderItems   OrderItem[]
 
   @@index([organizationId])
   @@index([categoryId])
@@ -404,6 +413,7 @@ model MenuItemVariant {
   updatedAt  DateTime @updatedAt
 
   menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
 
   @@unique([menuItemId, name])
   @@index([menuItemId])
@@ -524,6 +534,7 @@ model Reservation {
   customer     User?                @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
   tables       ReservationTable[]
   statusHistory ReservationStatusHistory[]
+  orders       Order[]
 
   @@index([organizationId])
   @@index([branchId, startAt])
@@ -571,4 +582,268 @@ model ReservationStatusHistory {
 
   @@index([reservationId, createdAt])
   @@map("reservation_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Orders, Payments, Invoicing
+// ---------------------------------------------------------------------------
+//
+// Deviations / notable decisions (documented, not silent):
+//
+// 1. Order items and modifiers SNAPSHOT their name/price at order time
+//    (nameSnapshot, unitPriceSnapshot, priceDeltaSnapshot) rather than
+//    living FKs into current menu state. Editing a menu item's price next
+//    week must never rewrite what a customer was actually charged last
+//    month — same immutability principle the accounting phase (10) will
+//    depend on. The FK to the menu row is kept alongside the snapshot
+//    purely for traceability ("which item was this"), with onDelete:
+//    Restrict so a historical order can never be left dangling.
+// 2. No separate `customers` table here either — same reasoning as
+//    Reservation (see that model's header comment). Order carries an
+//    optional `customerUserId` plus a guest contact snapshot.
+// 3. No real payment gateway. `OrderPayment` is staff-recorded ("cash
+//    received", "paid via GCash") — see `lib/payments/PaymentProvider.ts`
+//    for the (currently unimplemented) seam a real provider will plug into.
+// 4. Invoice numbering is sequential PER BRANCH (`InvoiceSequence`,
+//    incremented atomically via upsert inside the same transaction that
+//    creates the Invoice), matching how PH BIR-registered receipt series
+//    are typically issued per point-of-sale. This is NOT yet
+//    BIR-accredited official-receipt numbering — flagged in
+//    docs/architecture.md § Risks for accountant sign-off before going live.
+// 5. `invoices` has a partial unique index — "at most one non-VOID invoice
+//    per order" — that has NO representation in Prisma's schema DSL
+//    (partial/filtered unique indexes aren't expressible here, the same gap
+//    as Phase 3's EXCLUDE constraint). It is hand-written directly into the
+//    migration SQL (prisma/migrations/*_phase4_orders/migration.sql):
+//
+//      CREATE UNIQUE INDEX invoices_one_active_per_order
+//        ON invoices ("orderId") WHERE (status != 'VOID');
+//
+//    `InvoiceService` also checks this in application code first (for a
+//    clear error message), but the index is the real guarantee under a
+//    race — verified with a concurrent test the same way Phase 3's
+//    double-booking constraint was, just for "assign the next number
+//    safely" instead of "reject an overlapping range."
+
+enum OrderType {
+  DINE_IN
+  TAKEOUT
+  DELIVERY
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+}
+
+enum OrderPaymentMethod {
+  CASH
+  CARD
+  GCASH
+  MAYA
+  BANK_TRANSFER
+  OTHER
+}
+
+enum OrderPaymentStatus {
+  PENDING
+  COMPLETED
+  REFUNDED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOID
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  organizationId String
+  branchId       String
+  type           OrderType
+  status         OrderStatus @default(PENDING)
+
+  // Optional: registered account. Independent of the guest snapshot below,
+  // same pattern as Reservation.
+  customerUserId String?
+  guestName      String?
+  guestPhone     String?
+  guestEmail     String?
+
+  // DINE_IN: tableId identifies where the order is being served; a walk-in
+  // dine-in order may or may not trace back to a reservationId.
+  tableId       String?
+  reservationId String?
+  // DELIVERY only — validated at the Zod layer, not the DB, same approach
+  // as Reservation's business-hours check.
+  deliveryAddress String?
+
+  // Always server-computed from the current menu at order time — see
+  // OrderService. Never trust a client-submitted total.
+  subtotal      Decimal @db.Decimal(10, 2)
+  taxTotal      Decimal @db.Decimal(10, 2)
+  discountTotal Decimal @default(0) @db.Decimal(10, 2)
+  total         Decimal @db.Decimal(10, 2)
+
+  notes              String?
+  cancellationReason String?
+  cancelledAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     User?            @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  table        RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  reservation  Reservation?     @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
+  payments      OrderPayment[]
+  invoices      Invoice[]
+
+  @@index([organizationId])
+  @@index([branchId, createdAt])
+  @@index([customerUserId])
+  @@index([tableId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                String  @id @default(cuid())
+  orderId           String
+  menuItemId        String
+  menuItemVariantId String?
+
+  nameSnapshot      String
+  unitPriceSnapshot Decimal @db.Decimal(10, 2)
+  quantity          Int
+  lineSubtotal      Decimal @db.Decimal(10, 2)
+  modifiersTotal    Decimal @default(0) @db.Decimal(10, 2)
+  lineTotal         Decimal @db.Decimal(10, 2)
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  order     Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem  MenuItem            @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  variant   MenuItemVariant?    @relation(fields: [menuItemVariantId], references: [id], onDelete: Restrict)
+  modifiers OrderItemModifier[]
+
+  @@index([orderId])
+  @@index([menuItemId])
+  @@map("order_items")
+}
+
+model OrderItemModifier {
+  id                 String   @id @default(cuid())
+  orderItemId        String
+  modifierId         String
+  nameSnapshot       String
+  priceDeltaSnapshot Decimal  @db.Decimal(10, 2)
+  createdAt          DateTime @default(now())
+
+  orderItem OrderItem    @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  modifier  MenuModifier @relation(fields: [modifierId], references: [id], onDelete: Restrict)
+
+  @@index([orderItemId])
+  @@map("order_item_modifiers")
+}
+
+model OrderStatusHistory {
+  id              String       @id @default(cuid())
+  orderId         String
+  fromStatus      OrderStatus?
+  toStatus        OrderStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime     @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+model OrderPayment {
+  id               String             @id @default(cuid())
+  organizationId   String
+  orderId          String
+  method           OrderPaymentMethod
+  amount           Decimal            @db.Decimal(10, 2)
+  status           OrderPaymentStatus @default(COMPLETED)
+  note             String?
+  recordedByUserId String?
+  createdAt        DateTime           @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_payments")
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  organizationId String
+  branchId       String
+  orderId        String
+
+  // Sequential per branch — see file header for the numbering scheme and
+  // its (documented, hand-written) partial unique index.
+  invoiceNumber String
+  status        InvoiceStatus @default(ISSUED)
+
+  subtotal      Decimal @db.Decimal(10, 2)
+  taxTotal      Decimal @db.Decimal(10, 2)
+  discountTotal Decimal @db.Decimal(10, 2)
+  total         Decimal @db.Decimal(10, 2)
+
+  issuedAt   DateTime  @default(now())
+  voidedAt   DateTime?
+  voidReason String?
+  notes      String?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  items        InvoiceItem[]
+
+  @@unique([branchId, invoiceNumber])
+  @@index([organizationId])
+  @@index([orderId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id                String  @id @default(cuid())
+  invoiceId         String
+  nameSnapshot      String
+  unitPriceSnapshot Decimal @db.Decimal(10, 2)
+  quantity          Int
+  lineTotal         Decimal @db.Decimal(10, 2)
+  // Flattened, human-readable modifier summary (e.g. "Extra Egg, Extra
+  // Rice") rather than a further-nested modifier table — an invoice line is
+  // a frozen historical snapshot, not a live editable structure.
+  modifiersSummary String?
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+model InvoiceSequence {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String   @unique
+  lastNumber     Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@map("invoice_sequences")
 }
