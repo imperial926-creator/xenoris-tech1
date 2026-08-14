@@ -18,7 +18,7 @@ export default async function DashboardOverviewPage() {
   const startOfTomorrow = new Date(startOfToday);
   startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
 
-  const [branches, menuItems, tableCount, reservationsToday, ordersToday, kitchenQueueCount] = await Promise.all([
+  const [branches, menuItems, tableCount, reservationsToday, ordersToday, kitchenQueueCount, activeDeliveriesCount] = await Promise.all([
     BranchService.list(session.organizationId),
     MenuService.listItems(session.organizationId),
     prisma.restaurantTable.count({ where: { organizationId: session.organizationId } }),
@@ -42,6 +42,12 @@ export default async function DashboardOverviewPage() {
         status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] },
       },
     }),
+    prisma.deliveryOrder.count({
+      where: {
+        organizationId: session.organizationId,
+        status: { in: ['UNASSIGNED', 'ASSIGNED', 'PICKED_UP'] },
+      },
+    }),
   ]);
 
   return (
@@ -50,8 +56,8 @@ export default async function DashboardOverviewPage() {
         <h1 className="text-2xl font-semibold tracking-tight">Business Overview</h1>
         <p className="text-sm text-muted-foreground">
           Phase 1 (foundation), Phase 2 (tables &amp; menu), Phase 3 (reservations), Phase 4
-          (orders, payments &amp; invoicing), and Phase 5 (kitchen display) are live. Operational
-          and financial modules below activate as each phase ships — see{' '}
+          (orders, payments &amp; invoicing), Phase 5 (kitchen display), and Phase 6 (delivery) are
+          live. Operational and financial modules below activate as each phase ships — see{' '}
           <code className="text-xs">CLAUDE.md</code> for status.
         </p>
       </div>
@@ -117,6 +123,17 @@ export default async function DashboardOverviewPage() {
           <CardContent>
             <p className="text-3xl font-semibold">{kitchenQueueCount}</p>
             <p className="text-sm text-muted-foreground">tickets from new through ready</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Active Deliveries</CardTitle>
+            <CardDescription>Live data — delivery module (Phase 6)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-semibold">{activeDeliveriesCount}</p>
+            <p className="text-sm text-muted-foreground">unassigned, assigned, or picked up</p>
           </CardContent>
         </Card>
 
