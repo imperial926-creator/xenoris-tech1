@@ -787,6 +787,104 @@ async function main() {
   }
   console.log(`  seeded ${orderCount} orders across DINE_IN/TAKEOUT/DELIVERY and every status, ${invoiceCount} invoice(s)`);
 
+  // --- Phase 6: delivery zones, a driver profile, one dispatched delivery --
+  // Two zones per branch so the Delivery board has real data to manage, a
+  // Driver profile for the already-seeded DRIVER-role demo user (created in
+  // the per-role loop above), and — the meaningful part — retrofitting the
+  // Phase 4 "delivery-preparing" seed order with a real zone/fee so it
+  // demonstrates the actual point of Phase 6: the fee flows into the
+  // order's total, not just decoration on a delivery record.
+  const zoneDefs: Array<{ branchId: string; name: string; deliveryFee: string }> = [
+    { branchId: branchA.id, name: '[DEMO] Downtown', deliveryFee: '50.00' },
+    { branchId: branchA.id, name: '[DEMO] North District', deliveryFee: '80.00' },
+    { branchId: branchB.id, name: '[DEMO] City Center', deliveryFee: '60.00' },
+  ];
+  const zoneByName = new Map<string, { id: string; deliveryFee: string }>();
+  for (const def of zoneDefs) {
+    const zone = await prisma.deliveryZone.upsert({
+      where: { branchId_name: { branchId: def.branchId, name: def.name } },
+      update: {},
+      create: { organizationId: organization.id, branchId: def.branchId, name: def.name, deliveryFee: def.deliveryFee },
+    });
+    zoneByName.set(def.name, { id: zone.id, deliveryFee: def.deliveryFee });
+  }
+  console.log(`  seeded ${zoneDefs.length} delivery zones`);
+
+  const driverUser = await prisma.user.findFirstOrThrow({
+    where: { organizationId: organization.id, email: 'driver@restaurant-platform.local' },
+  });
+  const driver = await prisma.driver.upsert({
+    where: { userId: driverUser.id },
+    update: {},
+    create: {
+      organizationId: organization.id,
+      branchId: branchA.id,
+      userId: driverUser.id,
+      vehicleType: 'Motorcycle',
+      vehiclePlate: '[DEMO] ABC-1234',
+    },
+  });
+  console.log(`  seeded 1 driver profile -> ${driverUser.email}`);
+
+  const downtownZone = zoneByName.get('[DEMO] Downtown')!;
+  const deliveryOrder = await prisma.order.findUniqueOrThrow({
+    where: { id: `${organization.id}-order-delivery-preparing` },
+  });
+  // Backfill the fee into the order's own total — see schema.prisma's Phase
+  // 6 comment for why deliveryFee lives on Order at all. Guarded on
+  // deliveryFee still being unset so `prisma db seed` stays idempotent —
+  // without this check, re-running the seed would add the fee again on
+  // every run instead of upserting to a fixed value.
+  const deliveryFeeAmount = Number(downtownZone.deliveryFee);
+  if (Number(deliveryOrder.deliveryFee) === 0) {
+    await prisma.order.update({
+      where: { id: deliveryOrder.id },
+      data: {
+        deliveryFee: downtownZone.deliveryFee,
+        total: (Number(deliveryOrder.total) + deliveryFeeAmount).toFixed(2),
+      },
+    });
+  }
+
+  const deliveryOrderRecord = await prisma.deliveryOrder.upsert({
+    where: { orderId: deliveryOrder.id },
+    update: {},
+    create: {
+      id: `${organization.id}-delivery-order-delivery-preparing`,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      orderId: deliveryOrder.id,
+      deliveryZoneId: downtownZone.id,
+      deliveryFee: downtownZone.deliveryFee,
+      driverId: driver.id,
+      status: 'ASSIGNED',
+    },
+  });
+  const deliveryHistoryExists = await prisma.deliveryStatusHistory.findFirst({
+    where: { deliveryOrderId: deliveryOrderRecord.id },
+  });
+  if (!deliveryHistoryExists) {
+    await prisma.deliveryStatusHistory.create({
+      data: { deliveryOrderId: deliveryOrderRecord.id, fromStatus: null, toStatus: 'UNASSIGNED' },
+    });
+    await prisma.deliveryStatusHistory.create({
+      data: {
+        deliveryOrderId: deliveryOrderRecord.id,
+        fromStatus: 'UNASSIGNED',
+        toStatus: 'ASSIGNED',
+        changedByUserId: driverUser.id,
+        note: '[DEMO] Dispatched to the on-shift driver.',
+      },
+    });
+  }
+  const assignmentId = `${organization.id}-driver-assignment-delivery-preparing`;
+  await prisma.driverAssignment.upsert({
+    where: { id: assignmentId },
+    update: {},
+    create: { id: assignmentId, deliveryOrderId: deliveryOrderRecord.id, driverId: driver.id },
+  });
+  console.log('  seeded 1 dispatched delivery order (ASSIGNED, fee included in order total)');
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
