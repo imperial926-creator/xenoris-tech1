@@ -1,6 +1,8 @@
 import { getSession } from '@/lib/auth/session';
 import { requireAuthenticated } from '@/lib/auth/rbac';
 import { BranchService } from '@/services/branches/BranchService';
+import { MenuService } from '@/services/menu/MenuService';
+import { prisma } from '@/lib/db/prisma';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 const PLACEHOLDER_CARDS = [
@@ -13,15 +15,20 @@ const PLACEHOLDER_CARDS = [
 
 export default async function DashboardOverviewPage() {
   const session = requireAuthenticated(await getSession());
-  const branches = await BranchService.list(session.organizationId);
+  const [branches, menuItems, tableCount] = await Promise.all([
+    BranchService.list(session.organizationId),
+    MenuService.listItems(session.organizationId),
+    prisma.restaurantTable.count({ where: { organizationId: session.organizationId } }),
+  ]);
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Business Overview</h1>
         <p className="text-sm text-muted-foreground">
-          Phase 1 foundation is live. Operational and financial modules below activate as each
-          phase ships — see <code className="text-xs">CLAUDE.md</code> for status.
+          Phase 1 (foundation) and Phase 2 (tables &amp; menu) are live. Operational and
+          financial modules below activate as each phase ships — see{' '}
+          <code className="text-xs">CLAUDE.md</code> for status.
         </p>
       </div>
 
@@ -41,6 +48,18 @@ export default async function DashboardOverviewPage() {
                 </li>
               ))}
             </ul>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Tables &amp; Menu</CardTitle>
+            <CardDescription>Live data — restaurant configuration module (Phase 2)</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            <p className="text-3xl font-semibold">{tableCount}</p>
+            <p className="text-sm text-muted-foreground">tables configured</p>
+            <p className="pt-2 text-sm text-muted-foreground">{menuItems.length} menu items</p>
           </CardContent>
         </Card>
 

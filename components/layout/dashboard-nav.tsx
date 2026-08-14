@@ -7,7 +7,8 @@ import { cn } from '@/lib/utils/cn';
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Overview', phase: null },
   { href: '/dashboard/reservations', label: 'Reservations', phase: 3 },
-  { href: '/dashboard/tables', label: 'Tables', phase: 2 },
+  { href: '/dashboard/tables', label: 'Tables', phase: null },
+  { href: '/dashboard/menu', label: 'Menu', phase: null },
   { href: '/dashboard/orders', label: 'Orders', phase: 4 },
   { href: '/dashboard/kitchen', label: 'Kitchen', phase: 5 },
   { href: '/dashboard/catering', label: 'Catering', phase: 7 },
@@ -16,7 +17,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/finance', label: 'Finance', phase: 10 },
   { href: '/dashboard/reports', label: 'Reports', phase: 11 },
   { href: '/dashboard/analytics', label: 'Analytics', phase: 12 },
-  { href: '/dashboard/settings', label: 'Settings', phase: 2 },
+  { href: '/dashboard/settings', label: 'Settings', phase: null },
 ] as const;
 
 export function DashboardNav() {

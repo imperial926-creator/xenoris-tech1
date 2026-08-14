@@ -4,6 +4,7 @@ import { OrganizationService } from '@/services/organizations/OrganizationServic
 import { BranchService } from '@/services/branches/BranchService';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { BranchForm } from './branch-form';
+import { BusinessHoursEditor } from './business-hours-editor';
 
 export default async function SettingsPage() {
   const session = requireAuthenticated(await getSession());
@@ -48,8 +49,8 @@ export default async function SettingsPage() {
         <CardHeader>
           <CardTitle className="text-base">Branches</CardTitle>
           <CardDescription>
-            Table/menu/hours configuration per branch arrives in Phase 2 — this is branch
-            creation only.
+            Tables and menu are managed on their own pages. Business hours are set here, per
+            branch.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -58,10 +59,16 @@ export default async function SettingsPage() {
               <li className="p-3 text-sm text-muted-foreground">No branches yet.</li>
             )}
             {branches.map((b) => (
-              <li key={b.id} className="flex items-center justify-between p-3 text-sm">
-                <span className="font-medium">{b.name}</span>
-                <span className="text-muted-foreground">{b.address || '—'}</span>
-                <span className="rounded bg-muted px-2 py-0.5 text-xs">{b.status}</span>
+              <li key={b.id} className="p-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">{b.name}</span>
+                  <span className="text-muted-foreground">{b.address || '—'}</span>
+                  <span className="rounded bg-muted px-2 py-0.5 text-xs">{b.status}</span>
+                </div>
+                <BusinessHoursEditor
+                  branchId={b.id}
+                  initialHours={b.openingHours as Record<string, { open: string; close: string; closed: boolean }> | null}
+                />
               </li>
             ))}
           </ul>
