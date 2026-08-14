@@ -308,6 +308,195 @@ async function main() {
   }
   console.log('  seeded 2 modifier groups (Rice Size, Add-ons) linked to Chicken Inasal Meal');
 
+  // --- Phase 3: reservations, across every status -----------------------
+  // Fixed offsets from "now" (seed time) rather than fixed calendar dates,
+  // so PENDING/CONFIRMED demo bookings are always in the future and
+  // COMPLETED/CANCELLED/NO_SHOW ones are always in the past, no matter when
+  // `npm run db:seed` is actually run.
+  const now = new Date();
+  const atOffset = (days: number, hour: number, minute = 0) => {
+    const d = new Date(now);
+    d.setDate(d.getDate() + days);
+    d.setHours(hour, minute, 0, 0);
+    return d;
+  };
+  const plusMinutes = (d: Date, minutes: number) => new Date(d.getTime() + minutes * 60 * 1000);
+
+  async function getTable(branchId: string, tableNumber: string) {
+    return prisma.restaurantTable.findUniqueOrThrow({ where: { branchId_tableNumber: { branchId, tableNumber } } });
+  }
+
+  interface ReservationSeed {
+    slug: string;
+    branchId: string;
+    tableNumber: string;
+    guestName: string;
+    guestPhone?: string;
+    guestEmail?: string;
+    guestCount: number;
+    startAt: Date;
+    durationMinutes: number;
+    status: 'PENDING' | 'CONFIRMED' | 'SEATED' | 'COMPLETED' | 'CANCELLED' | 'NO_SHOW';
+    occasion?: string;
+    specialRequests?: string;
+    depositRequired?: boolean;
+    depositAmount?: string;
+    depositStatus?: 'NONE' | 'PENDING' | 'PAID' | 'REFUNDED';
+    depositNote?: string;
+    cancellationReason?: string;
+  }
+
+  const reservationDefs: ReservationSeed[] = [
+    {
+      slug: 'pending-tomorrow',
+      branchId: branchA.id,
+      tableNumber: 'M1',
+      guestName: '[DEMO] Juan Dela Cruz',
+      guestPhone: '+63 917 000 0001',
+      guestCount: 2,
+      startAt: atOffset(1, 18, 0),
+      durationMinutes: 90,
+      status: 'PENDING',
+    },
+    {
+      slug: 'confirmed-tomorrow-deposit',
+      branchId: branchA.id,
+      tableNumber: 'M2',
+      guestName: '[DEMO] Maria Santos',
+      guestPhone: '+63 917 000 0002',
+      guestEmail: 'maria.santos.demo@example.com',
+      guestCount: 4,
+      startAt: atOffset(1, 19, 30),
+      durationMinutes: 120,
+      status: 'CONFIRMED',
+      occasion: 'Anniversary',
+      depositRequired: true,
+      depositAmount: '500.00',
+      depositStatus: 'PAID',
+      depositNote: '[DEMO] Paid via GCash, confirmed by phone.',
+    },
+    {
+      slug: 'seated-today',
+      branchId: branchA.id,
+      tableNumber: 'M3',
+      guestName: '[DEMO] Walk-in Party',
+      guestCount: 3,
+      startAt: atOffset(0, 12, 0),
+      durationMinutes: 90,
+      status: 'SEATED',
+      specialRequests: 'High chair for a toddler.',
+    },
+    {
+      slug: 'completed-yesterday',
+      branchId: branchA.id,
+      tableNumber: 'M4',
+      guestName: '[DEMO] Ramon Reyes',
+      guestPhone: '+63 917 000 0004',
+      guestCount: 5,
+      startAt: atOffset(-1, 19, 0),
+      durationMinutes: 120,
+      status: 'COMPLETED',
+      occasion: 'Birthday',
+      depositRequired: true,
+      depositAmount: '1000.00',
+      depositStatus: 'PAID',
+      depositNote: '[DEMO] Cash deposit collected at booking.',
+    },
+    {
+      slug: 'cancelled-upcoming',
+      branchId: branchA.id,
+      tableNumber: 'M5',
+      guestName: '[DEMO] Liza Fernandez',
+      guestPhone: '+63 917 000 0005',
+      guestCount: 2,
+      startAt: atOffset(2, 20, 0),
+      durationMinutes: 90,
+      status: 'CANCELLED',
+      cancellationReason: '[DEMO] Guest rescheduled to a later date.',
+    },
+    {
+      slug: 'no-show-yesterday',
+      branchId: branchA.id,
+      tableNumber: 'M6',
+      guestName: '[DEMO] Carlo Bautista',
+      guestPhone: '+63 917 000 0006',
+      guestCount: 2,
+      startAt: atOffset(-1, 20, 0),
+      durationMinutes: 90,
+      status: 'NO_SHOW',
+    },
+    {
+      slug: 'pending-qc',
+      branchId: branchB.id,
+      tableNumber: 'P1',
+      guestName: '[DEMO] Grace Villanueva',
+      guestPhone: '+63 917 000 0007',
+      guestCount: 2,
+      startAt: atOffset(3, 18, 30),
+      durationMinutes: 90,
+      status: 'PENDING',
+    },
+  ];
+
+  let reservationCount = 0;
+  for (const def of reservationDefs) {
+    const table = await getTable(def.branchId, def.tableNumber);
+    const endAt = plusMinutes(def.startAt, def.durationMinutes);
+    const id = `${organization.id}-reservation-${def.slug}`;
+
+    const reservation = await prisma.reservation.upsert({
+      where: { id },
+      update: {},
+      create: {
+        id,
+        organizationId: organization.id,
+        branchId: def.branchId,
+        guestName: def.guestName,
+        guestPhone: def.guestPhone,
+        guestEmail: def.guestEmail,
+        guestCount: def.guestCount,
+        startAt: def.startAt,
+        endAt,
+        status: def.status,
+        occasion: def.occasion,
+        specialRequests: def.specialRequests,
+        depositRequired: def.depositRequired ?? false,
+        depositAmount: def.depositAmount,
+        depositStatus: def.depositStatus ?? 'NONE',
+        depositNote: def.depositNote,
+        cancellationReason: def.cancellationReason,
+        cancelledAt: def.status === 'CANCELLED' ? now : undefined,
+      },
+    });
+
+    const rtId = `${id}-table`;
+    await prisma.reservationTable.upsert({
+      where: { id: rtId },
+      update: {},
+      create: {
+        id: rtId,
+        reservationId: reservation.id,
+        tableId: table.id,
+        startAt: def.startAt,
+        endAt,
+        // Denormalized status must match the reservation's status — see
+        // schema.prisma's "Phase 3 — Reservations" comment for why.
+        status: def.status,
+      },
+    });
+
+    const historyExists = await prisma.reservationStatusHistory.findFirst({
+      where: { reservationId: reservation.id },
+    });
+    if (!historyExists) {
+      await prisma.reservationStatusHistory.create({
+        data: { reservationId: reservation.id, fromStatus: null, toStatus: def.status },
+      });
+    }
+    reservationCount += 1;
+  }
+  console.log(`  seeded ${reservationCount} reservations across PENDING/CONFIRMED/SEATED/COMPLETED/CANCELLED/NO_SHOW`);
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
