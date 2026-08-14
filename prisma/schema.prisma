@@ -1,0 +1,208 @@
+// ---------------------------------------------------------------------------
+// Restaurant Platform — Prisma Schema
+// Phase 1 (Foundation) scope only: organizations, branches, users, RBAC, audit log.
+// See docs/database.md for conventions and the forward-looking schema for later phases.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  legalName String?
+  email     String   @unique
+  phone     String?
+  currency  String   @default("PHP")
+  timezone  String   @default("Asia/Manila")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches  Branch[]
+  users     User[]
+  roles     Role[]
+  userRoles UserRole[]
+  auditLogs AuditLog[]
+
+  @@map("organizations")
+}
+
+enum BranchStatus {
+  ACTIVE
+  INACTIVE
+  TEMPORARILY_CLOSED
+}
+
+model Branch {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  address        String?
+  phone          String?
+  email          String?
+  timezone       String       @default("Asia/Manila")
+  openingHours   Json?
+  status         BranchStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userRoles    UserRole[]
+  auditLogs    AuditLog[]
+
+  @@index([organizationId])
+  @@map("branches")
+}
+
+// ---------------------------------------------------------------------------
+// Users & RBAC
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  DEACTIVATED
+}
+
+model User {
+  id             String     @id @default(cuid())
+  organizationId String
+  email          String
+  passwordHash   String
+  firstName      String
+  lastName       String
+  phone          String?
+  status         UserStatus @default(ACTIVE)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userRoles    UserRole[]
+  auditLogs    AuditLog[]
+
+  // Email is unique per organization, not globally — the same person may be a
+  // customer of multiple independent restaurant organizations on the platform.
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@map("users")
+}
+
+// Global catalog of role names used by seed data & UI. Organizations may define
+// additional custom roles later; these are the seven the spec mandates.
+enum RoleName {
+  CUSTOMER
+  STAFF
+  MANAGER
+  ACCOUNTANT
+  DRIVER
+  OWNER
+  ADMINISTRATOR
+}
+
+model Role {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           RoleName
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("roles")
+}
+
+// Platform-wide catalog of grantable permissions. Format: "<domain>:<action>",
+// e.g. "org:manage", "branch:manage", "user:manage", "reservation:manage".
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  description String
+  createdAt   DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(cuid())
+  roleId       String
+  permissionId String
+  createdAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id             String   @id @default(cuid())
+  userId         String
+  roleId         String
+  organizationId String
+  // Optional: a role assignment can be scoped to a single branch (e.g. a manager
+  // at exactly one branch). Null means org-wide for that role.
+  branchId       String?
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  // Note: because branchId is nullable, Postgres treats each NULL as distinct
+  // for uniqueness purposes — this constraint does NOT prevent granting the
+  // same org-wide (branchId = null) role to a user twice via a race
+  // condition. AuthService/seed avoid this by construction (one create per
+  // role per user). Revisit with a partial unique index if that becomes a
+  // real risk once open staff-invite flows exist (Phase 2+).
+  @@unique([userId, roleId, branchId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// Audit Log
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String?
+  userId         String?
+  action         String
+  entityType     String
+  entityId       String
+  previousValue  Json?
+  newValue       Json?
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
