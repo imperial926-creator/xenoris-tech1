@@ -39,6 +39,9 @@ model Organization {
   reservations       Reservation[]
   orders             Order[]
   invoices           Invoice[]
+  deliveryZones      DeliveryZone[]
+  drivers            Driver[]
+  deliveryOrders     DeliveryOrder[]
 
   @@map("organizations")
 }
@@ -71,6 +74,9 @@ model Branch {
   orders        Order[]
   invoices      Invoice[]
   invoiceSequence InvoiceSequence?
+  deliveryZones DeliveryZone[]
+  drivers       Driver[]
+  deliveryOrders DeliveryOrder[]
 
   @@index([organizationId])
   @@map("branches")
@@ -108,6 +114,10 @@ model User {
   // full CRM identity is a later phase; this is just "was there an account").
   reservations Reservation[]
   orders       Order[]
+  // A Driver profile exists only for users actually dispatched for delivery
+  // (typically, but not necessarily only, those with the DRIVER role) — see
+  // the "Phase 6 — Delivery" comment block near the Driver model.
+  driverProfile Driver?
 
   // Email is unique per organization, not globally — the same person may be a
   // customer of multiple independent restaurant organizations on the platform.
@@ -710,7 +720,14 @@ model Order {
   subtotal      Decimal @db.Decimal(10, 2)
   taxTotal      Decimal @db.Decimal(10, 2)
   discountTotal Decimal @default(0) @db.Decimal(10, 2)
-  total         Decimal @db.Decimal(10, 2)
+  // Phase 6 (Delivery) — snapshot of DeliveryZone.deliveryFee at order time,
+  // included in `total` below. Lives here (not only on DeliveryOrder) so the
+  // order's own total/payments/invoices are correct without every reader
+  // needing to join to DeliveryOrder — see the "Phase 6 — Delivery" comment
+  // block near DeliveryOrder for the full reasoning. Zero for non-delivery
+  // orders and for delivery orders placed without a zone.
+  deliveryFee Decimal @default(0) @db.Decimal(10, 2)
+  total       Decimal @db.Decimal(10, 2)
 
   notes              String?
   cancellationReason String?
@@ -737,6 +754,7 @@ model Order {
   statusHistory OrderStatusHistory[]
   payments      OrderPayment[]
   invoices      Invoice[]
+  delivery      DeliveryOrder?
 
   @@index([organizationId])
   @@index([branchId, createdAt])
@@ -877,4 +895,192 @@ model InvoiceSequence {
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   @@map("invoice_sequences")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Delivery
+// ---------------------------------------------------------------------------
+//
+// Deviations / notable decisions (documented, not silent):
+//
+// 1. `DeliveryOrder` is a 1:1 COMPANION table to `Order`, not a merge of
+//    delivery fields onto Order itself. The master spec lists it as its own
+//    table (`delivery_orders`), and the reasoning holds up structurally too:
+//    dine-in/take-out orders would otherwise carry a permanent block of
+//    always-null delivery columns (zone, driver, pickup/delivery
+//    timestamps, proof of delivery). `DeliveryOrder` is created
+//    automatically, in the same transaction as the Order itself, whenever
+//    `type = DELIVERY` — see OrderService.createOrder. The one exception is
+//    `Order.deliveryFee`: that field DOES live on Order (see its own
+//    comment above) because the fee has to be part of `Order.total` for
+//    payments/invoices to be correct, and every reader of `Order.total`
+//    would otherwise need to join to `DeliveryOrder` just to know if a fee
+//    applies. `DeliveryOrder.deliveryFee` is a second snapshot of the exact
+//    same value, kept for delivery-domain reporting — not a second source
+//    of truth, both are written atomically in the same transaction.
+// 2. `DeliveryOrder` has its OWN status lifecycle (`DeliveryStatus`),
+//    deliberately NOT reusing `OrderStatus` the way Phase 5's kitchen board
+//    reused it for the kitchen lifecycle. This is an intentional contrast:
+//    Phase 5's NEW/ACCEPTED/PREPARING/READY genuinely IS the same lifecycle
+//    as `OrderStatus`'s PENDING/CONFIRMED/PREPARING/READY (one order, one
+//    kitchen ticket, one axis of progress). Delivery dispatch is a
+//    different axis entirely — a driver can be ASSIGNED and en route to the
+//    restaurant while the kitchen is still PREPARING, and the order isn't
+//    DELIVERED until well after the kitchen already marked it READY.
+//    Collapsing these into one enum would force illegal-looking states
+//    (what does "order status = delivered" even mean while the kitchen
+//    portion is a separate concept?) or silently drop information. Kept
+//    fully decoupled: `DeliveryService` never writes `Order.status`, and
+//    `OrderService` never writes `DeliveryOrder.status` — see
+//    docs/architecture.md § 14 for the full reasoning, including why this
+//    phase deliberately does NOT auto-complete the parent Order when a
+//    delivery finishes (a debatable business call left to staff/managers
+//    rather than silently automated).
+// 3. `Driver` is a separate profile table, not just "a User with the DRIVER
+//    role." The DRIVER role continues to gate authentication/authorization
+//    (login, `delivery:manage` permission) exactly as it did from Phase 1 —
+//    `Driver` adds the operational fields RBAC has no reason to carry
+//    (vehicle info, phone, active/on-duty flag) and is what `DeliveryOrder`
+//    actually assigns against. A user can hold the DRIVER role without (yet)
+//    having a Driver profile — same "role grants capability, profile
+//    carries domain data" split already used for Reservation/Order's
+//    optional `customerUserId` link.
+// 4. `DriverAssignment` is an APPEND-ONLY audit trail, separate from
+//    `DeliveryOrder.driverId` (the current-state pointer used for fast
+//    board queries) — same "denormalized current value + full history
+//    table" pattern as `TableStatusHistory`/`OrderStatusHistory`, applied
+//    here because reassignment (a driver backs out, gets swapped) is a
+//    real, distinct event worth its own timestamped record, not just
+//    another line in the generic status history.
+// 5. No real navigation/maps/geocoding — `lib/notifications` and a maps
+//    provider are still unconfigured (see docs/architecture.md § 7 Risks).
+//    "Zone" is a plain named area staff define themselves (e.g. "North
+//    District"), not a geofenced polygon. Proof of delivery is a staff
+//    -entered text note + optional recipient name, not a photo — no object
+//    storage is configured (see `.env.example`), same "no fake
+//    integrations" rule Phase 4 applied to payments.
+
+enum DeliveryStatus {
+  UNASSIGNED
+  ASSIGNED
+  PICKED_UP
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+model DeliveryZone {
+  id             String  @id @default(cuid())
+  organizationId String
+  branchId       String
+  name           String
+  description    String?
+  deliveryFee    Decimal @default(0) @db.Decimal(10, 2)
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch         Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  deliveryOrders DeliveryOrder[]
+
+  @@unique([branchId, name])
+  @@index([organizationId])
+  @@map("delivery_zones")
+}
+
+model Driver {
+  id             String  @id @default(cuid())
+  organizationId String
+  branchId       String
+  userId         String  @unique
+  vehicleType    String?
+  vehiclePlate   String?
+  phone          String?
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch             @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries   DeliveryOrder[]
+  assignments  DriverAssignment[]
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("drivers")
+}
+
+model DeliveryOrder {
+  id             String         @id @default(cuid())
+  organizationId String
+  branchId       String
+  orderId        String         @unique
+  deliveryZoneId String?
+  driverId       String?
+  status         DeliveryStatus @default(UNASSIGNED)
+
+  // Snapshot of DeliveryZone.deliveryFee at order time — see the module
+  // header comment for why this duplicates (deliberately) Order.deliveryFee.
+  deliveryFee Decimal @default(0) @db.Decimal(10, 2)
+
+  estimatedDeliveryAt DateTime?
+  pickedUpAt          DateTime?
+  deliveredAt         DateTime?
+
+  // Lightweight, staff/driver-entered proof of delivery — see module header
+  // comment #5 for why this isn't a photo upload.
+  proofOfDeliveryNote String?
+  recipientName       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization  Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch                 @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  order         Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  deliveryZone  DeliveryZone?          @relation(fields: [deliveryZoneId], references: [id], onDelete: Restrict)
+  driver        Driver?                @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  statusHistory DeliveryStatusHistory[]
+  assignments   DriverAssignment[]
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([driverId])
+  @@map("delivery_orders")
+}
+
+model DeliveryStatusHistory {
+  id              String          @id @default(cuid())
+  deliveryOrderId String
+  fromStatus      DeliveryStatus?
+  toStatus        DeliveryStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime        @default(now())
+
+  deliveryOrder DeliveryOrder @relation(fields: [deliveryOrderId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryOrderId])
+  @@map("delivery_status_history")
+}
+
+model DriverAssignment {
+  id              String    @id @default(cuid())
+  deliveryOrderId String
+  driverId        String
+  assignedByUserId String?
+  assignedAt      DateTime  @default(now())
+  // Set when this assignment is superseded (reassigned to another driver,
+  // or the delivery is cancelled) — null means "currently active."
+  unassignedAt    DateTime?
+  note            String?
+
+  deliveryOrder DeliveryOrder @relation(fields: [deliveryOrderId], references: [id], onDelete: Cascade)
+  driver        Driver        @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryOrderId])
+  @@index([driverId])
+  @@map("driver_assignments")
 }
