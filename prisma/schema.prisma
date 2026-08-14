@@ -33,6 +33,9 @@ model Organization {
   roles     Role[]
   userRoles UserRole[]
   auditLogs AuditLog[]
+  menuCategories     MenuCategory[]
+  menuItems          MenuItem[]
+  menuModifierGroups MenuModifierGroup[]
 
   @@map("organizations")
 }
@@ -59,6 +62,8 @@ model Branch {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   userRoles    UserRole[]
   auditLogs    AuditLog[]
+  tableSections TableSection[]
+  tables        RestaurantTable[]
 
   @@index([organizationId])
   @@map("branches")
@@ -205,4 +210,209 @@ model AuditLog {
   @@index([organizationId, createdAt])
   @@index([entityType, entityId])
   @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Restaurant Configuration: Tables
+// ---------------------------------------------------------------------------
+
+model TableSection {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  name           String
+  description    String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  branch Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  tables RestaurantTable[]
+
+  @@unique([branchId, name])
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("table_sections")
+}
+
+enum TableStatus {
+  AVAILABLE
+  RESERVED
+  OCCUPIED
+  WAITING
+  CLEANING
+  OUT_OF_SERVICE
+}
+
+model RestaurantTable {
+  id             String      @id @default(cuid())
+  organizationId String
+  branchId       String
+  sectionId      String?
+  tableNumber    String
+  capacity       Int
+  status         TableStatus @default(AVAILABLE)
+  active         Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  branch        Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  section       TableSection?        @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  statusHistory TableStatusHistory[]
+
+  // Table numbers only need to be unique within a branch, not globally —
+  // two branches can both have a "Table 1".
+  @@unique([branchId, tableNumber])
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("restaurant_tables")
+}
+
+model TableStatusHistory {
+  id            String      @id @default(cuid())
+  tableId       String
+  fromStatus    TableStatus?
+  toStatus      TableStatus
+  changedByUserId String?
+  note          String?
+  createdAt     DateTime    @default(now())
+
+  table RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@index([tableId, createdAt])
+  @@map("table_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Restaurant Configuration: Menu
+// ---------------------------------------------------------------------------
+
+model MenuCategory {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  displayOrder   Int      @default(0)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  items        MenuItem[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("menu_categories")
+}
+
+// Not in the master spec's literal table list but required to express real
+// "choose one" (e.g. Size) vs "choose any" (e.g. Add-ons) modifier semantics
+// that Phase 4 order-taking needs — a flat, ungrouped modifier list can't
+// represent that distinction. See docs/database.md for the note.
+model MenuModifierGroup {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  // SINGLE = radio-button choice (e.g. "Size"), MULTIPLE = checkbox choices
+  // (e.g. "Add-ons").
+  selectionType  ModifierSelectionType @default(SINGLE)
+  required       Boolean  @default(false)
+  minSelect      Int      @default(0)
+  maxSelect      Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  modifiers    MenuModifier[]
+  itemLinks    MenuItemModifierGroup[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("menu_modifier_groups")
+}
+
+enum ModifierSelectionType {
+  SINGLE
+  MULTIPLE
+}
+
+model MenuModifier {
+  id              String   @id @default(cuid())
+  modifierGroupId String
+  name            String
+  // Additive price change when this modifier is selected — never negative
+  // discounting hidden in a modifier; discounts are a separate, explicit
+  // concept (Phase 4).
+  priceDelta      Decimal  @default(0) @db.Decimal(10, 2)
+  active          Boolean  @default(true)
+  displayOrder    Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  modifierGroup MenuModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([modifierGroupId, name])
+  @@index([modifierGroupId])
+  @@map("menu_modifiers")
+}
+
+model MenuItem {
+  id              String   @id @default(cuid())
+  organizationId String
+  categoryId      String
+  name            String
+  description     String?
+  price           Decimal  @db.Decimal(10, 2)
+  cost            Decimal? @db.Decimal(10, 2)
+  preparationTimeMinutes Int?
+  available       Boolean  @default(true)
+  imageUrl        String?
+  // Kept intentionally simple (a string, not a hard-coded tax engine) —
+  // real VAT/zero-rated/exempt treatment must be confirmed by a PH tax
+  // professional before this drives real invoicing math. See CLAUDE.md.
+  taxCategory     String   @default("STANDARD")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     MenuCategory            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  variants     MenuItemVariant[]
+  modifierGroups MenuItemModifierGroup[]
+
+  @@index([organizationId])
+  @@index([categoryId])
+  @@map("menu_items")
+}
+
+model MenuItemVariant {
+  id         String   @id @default(cuid())
+  menuItemId String
+  name       String
+  price      Decimal  @db.Decimal(10, 2)
+  cost       Decimal? @db.Decimal(10, 2)
+  active     Boolean  @default(true)
+  displayOrder Int    @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@unique([menuItemId, name])
+  @@index([menuItemId])
+  @@map("menu_item_variants")
+}
+
+model MenuItemModifierGroup {
+  id              String   @id @default(cuid())
+  menuItemId      String
+  modifierGroupId String
+  createdAt       DateTime @default(now())
+
+  menuItem      MenuItem          @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  modifierGroup MenuModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([menuItemId, modifierGroupId])
+  @@index([menuItemId])
+  @@map("menu_item_modifier_groups")
 }
