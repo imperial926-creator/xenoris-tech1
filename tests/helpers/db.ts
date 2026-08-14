@@ -7,6 +7,14 @@ import { prisma } from '@/lib/db/prisma';
  */
 export async function resetDatabase() {
   await prisma.auditLog.deleteMany();
+  // Phase 6 — delivery. Deleted before orders/users/branches, since
+  // driverAssignment/deliveryStatusHistory/deliveryOrder reference order,
+  // and driver/deliveryZone reference user/branch.
+  await prisma.driverAssignment.deleteMany();
+  await prisma.deliveryStatusHistory.deleteMany();
+  await prisma.deliveryOrder.deleteMany();
+  await prisma.driver.deleteMany();
+  await prisma.deliveryZone.deleteMany();
   await prisma.invoiceItem.deleteMany();
   await prisma.invoice.deleteMany();
   await prisma.invoiceSequence.deleteMany();
