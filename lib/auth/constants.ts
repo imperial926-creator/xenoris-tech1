@@ -96,6 +96,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleNameLiteral, PermissionKey[]> 
     // walk-ins, seating, cancellations) as a core part of the job.
     PERMISSIONS.RESERVATION_VIEW,
     PERMISSIONS.RESERVATION_MANAGE,
+    // Someone has to dispatch a ready delivery order to a driver — front
+    // -of-house staff, not just managers, same reasoning as ORDER_MANAGE
+    // above (Phase 6).
+    PERMISSIONS.DELIVERY_MANAGE,
   ],
   MANAGER: [
     PERMISSIONS.BRANCH_VIEW,
