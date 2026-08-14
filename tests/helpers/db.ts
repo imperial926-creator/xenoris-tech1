@@ -7,6 +7,15 @@ import { prisma } from '@/lib/db/prisma';
  */
 export async function resetDatabase() {
   await prisma.auditLog.deleteMany();
+  await prisma.tableStatusHistory.deleteMany();
+  await prisma.restaurantTable.deleteMany();
+  await prisma.tableSection.deleteMany();
+  await prisma.menuItemModifierGroup.deleteMany();
+  await prisma.menuModifier.deleteMany();
+  await prisma.menuModifierGroup.deleteMany();
+  await prisma.menuItemVariant.deleteMany();
+  await prisma.menuItem.deleteMany();
+  await prisma.menuCategory.deleteMany();
   await prisma.userRole.deleteMany();
   await prisma.rolePermission.deleteMany();
   await prisma.role.deleteMany();
