@@ -497,6 +497,282 @@ async function main() {
   }
   console.log(`  seeded ${reservationCount} reservations across PENDING/CONFIRMED/SEATED/COMPLETED/CANCELLED/NO_SHOW`);
 
+  // --- Phase 4: orders, order items/modifiers, payments, one invoice -------
+  // Hand-computed totals (not run through OrderService — this is direct
+  // Prisma seeding, same as every other seed block) using the same rule
+  // OrderService applies: 12% provisional VAT on STANDARD-taxCategory items
+  // (all seeded menu items default to STANDARD), applied to lineTotal
+  // (unit price × quantity, plus modifiers × quantity).
+  interface SeedOrderItem {
+    itemName: string;
+    quantity: number;
+    modifierNames?: string[];
+  }
+  interface SeedOrder {
+    slug: string;
+    branchId: string;
+    type: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY';
+    status: 'PENDING' | 'CONFIRMED' | 'PREPARING' | 'READY' | 'COMPLETED' | 'CANCELLED';
+    tableNumber?: string;
+    deliveryAddress?: string;
+    guestName?: string;
+    guestPhone?: string;
+    guestEmail?: string;
+    items: SeedOrderItem[];
+    payment?: { method: 'CASH' | 'CARD' | 'GCASH' | 'MAYA' | 'BANK_TRANSFER' | 'OTHER'; note?: string };
+    cancellationReason?: string;
+    issueInvoice?: boolean;
+  }
+
+  const orderDefs: SeedOrder[] = [
+    {
+      slug: 'dine-in-completed',
+      branchId: branchA.id,
+      type: 'DINE_IN',
+      status: 'COMPLETED',
+      tableNumber: 'M2',
+      guestName: '[DEMO] Dine-in Guest',
+      items: [
+        { itemName: 'Chicken Inasal Meal', quantity: 2, modifierNames: ['Extra Rice', 'Extra Egg'] },
+        { itemName: 'Iced Tea', quantity: 1 },
+      ],
+      payment: { method: 'CASH', note: '[DEMO] Paid in full at the table.' },
+      issueInvoice: true,
+    },
+    {
+      slug: 'takeout-ready',
+      branchId: branchA.id,
+      type: 'TAKEOUT',
+      status: 'READY',
+      guestName: '[DEMO] Takeout Guest',
+      guestPhone: '+63 917 000 0010',
+      items: [
+        { itemName: 'Beef Tapa Meal', quantity: 1 },
+        { itemName: 'Bottled Water', quantity: 1 },
+      ],
+    },
+    {
+      slug: 'delivery-preparing',
+      branchId: branchA.id,
+      type: 'DELIVERY',
+      status: 'PREPARING',
+      deliveryAddress: '[DEMO] 123 Sample St, Makati City',
+      guestName: '[DEMO] Delivery Guest',
+      guestPhone: '+63 917 000 0011',
+      guestEmail: 'delivery.guest.demo@example.com',
+      items: [
+        { itemName: 'Pork Sisig Meal', quantity: 1 },
+        { itemName: 'Soda', quantity: 1 },
+      ],
+    },
+    {
+      slug: 'dine-in-pending',
+      branchId: branchA.id,
+      type: 'DINE_IN',
+      status: 'PENDING',
+      tableNumber: 'M5',
+      items: [{ itemName: 'Grilled Liempo', quantity: 1 }],
+    },
+    {
+      slug: 'takeout-cancelled',
+      branchId: branchA.id,
+      type: 'TAKEOUT',
+      status: 'CANCELLED',
+      guestName: '[DEMO] Cancelled Guest',
+      items: [{ itemName: 'Halo-Halo', quantity: 1 }],
+      cancellationReason: '[DEMO] Guest changed their mind.',
+    },
+    {
+      slug: 'dine-in-qc-confirmed',
+      branchId: branchB.id,
+      type: 'DINE_IN',
+      status: 'CONFIRMED',
+      tableNumber: 'P1',
+      items: [
+        { itemName: 'Leche Flan', quantity: 2 },
+        { itemName: 'Calamansi Juice', quantity: 1 },
+      ],
+    },
+  ];
+
+  const VAT_RATE = 0.12;
+  const modifierByGroupAndName = new Map<string, { id: string; priceDelta: string }>([
+    ['Extra Rice', { id: (await prisma.menuModifier.findUniqueOrThrow({ where: { modifierGroupId_name: { modifierGroupId: sizeGroup.id, name: 'Extra Rice' } } })).id, priceDelta: '25.00' }],
+    ['Extra Egg', { id: (await prisma.menuModifier.findUniqueOrThrow({ where: { modifierGroupId_name: { modifierGroupId: addOnsGroup.id, name: 'Extra Egg' } } })).id, priceDelta: '20.00' }],
+  ]);
+
+  let orderCount = 0;
+  let invoiceCount = 0;
+  for (const def of orderDefs) {
+    const id = `${organization.id}-order-${def.slug}`;
+    let table: { id: string } | null = null;
+    if (def.tableNumber) table = await getTable(def.branchId, def.tableNumber);
+
+    let subtotal = 0;
+    const lineData: Array<{
+      itemName: string;
+      menuItemId: string;
+      unitPrice: number;
+      quantity: number;
+      modifiersTotal: number;
+      lineSubtotal: number;
+      lineTotal: number;
+      modifierNames: string[];
+    }> = [];
+    for (const line of def.items) {
+      const item = itemByName.get(line.itemName)!;
+      const unitPrice = Number(item.price);
+      const modifierNames = line.modifierNames ?? [];
+      const modifierUnitTotal = modifierNames.reduce(
+        (sum, name) => sum + Number(modifierByGroupAndName.get(name)!.priceDelta),
+        0,
+      );
+      const lineSubtotal = unitPrice * line.quantity;
+      const modifiersTotal = modifierUnitTotal * line.quantity;
+      const lineTotal = lineSubtotal + modifiersTotal;
+      subtotal += lineTotal;
+      lineData.push({
+        itemName: line.itemName,
+        menuItemId: item.id,
+        unitPrice,
+        quantity: line.quantity,
+        modifiersTotal,
+        lineSubtotal,
+        lineTotal,
+        modifierNames,
+      });
+    }
+    const taxTotal = Math.round(subtotal * VAT_RATE * 100) / 100;
+    const total = Math.round((subtotal + taxTotal) * 100) / 100;
+
+    const order = await prisma.order.upsert({
+      where: { id },
+      update: {},
+      create: {
+        id,
+        organizationId: organization.id,
+        branchId: def.branchId,
+        type: def.type,
+        status: def.status,
+        tableId: table?.id,
+        guestName: def.guestName,
+        guestPhone: def.guestPhone,
+        guestEmail: def.guestEmail,
+        deliveryAddress: def.deliveryAddress,
+        subtotal: subtotal.toFixed(2),
+        taxTotal: taxTotal.toFixed(2),
+        discountTotal: '0.00',
+        total: total.toFixed(2),
+        cancellationReason: def.cancellationReason,
+        cancelledAt: def.status === 'CANCELLED' ? now : undefined,
+      },
+    });
+
+    for (const [idx, line] of lineData.entries()) {
+      const itemId = `${id}-item-${idx}`;
+      const orderItem = await prisma.orderItem.upsert({
+        where: { id: itemId },
+        update: {},
+        create: {
+          id: itemId,
+          orderId: order.id,
+          menuItemId: line.menuItemId,
+          nameSnapshot: line.itemName,
+          unitPriceSnapshot: line.unitPrice.toFixed(2),
+          quantity: line.quantity,
+          lineSubtotal: line.lineSubtotal.toFixed(2),
+          modifiersTotal: line.modifiersTotal.toFixed(2),
+          lineTotal: line.lineTotal.toFixed(2),
+        },
+      });
+      for (const [midx, modName] of line.modifierNames.entries()) {
+        const mod = modifierByGroupAndName.get(modName)!;
+        const modId = `${itemId}-mod-${midx}`;
+        await prisma.orderItemModifier.upsert({
+          where: { id: modId },
+          update: {},
+          create: {
+            id: modId,
+            orderItemId: orderItem.id,
+            modifierId: mod.id,
+            nameSnapshot: modName,
+            priceDeltaSnapshot: mod.priceDelta,
+          },
+        });
+      }
+    }
+
+    const histExists = await prisma.orderStatusHistory.findFirst({ where: { orderId: order.id } });
+    if (!histExists) {
+      await prisma.orderStatusHistory.create({
+        data: { orderId: order.id, fromStatus: null, toStatus: def.status },
+      });
+    }
+
+    if (def.payment) {
+      const payId = `${id}-payment`;
+      await prisma.orderPayment.upsert({
+        where: { id: payId },
+        update: {},
+        create: {
+          id: payId,
+          organizationId: organization.id,
+          orderId: order.id,
+          method: def.payment.method,
+          amount: total.toFixed(2),
+          status: 'COMPLETED',
+          note: def.payment.note,
+        },
+      });
+    }
+
+    if (def.issueInvoice) {
+      const seqId = `${def.branchId}-invoice-seq`;
+      const sequence = await prisma.invoiceSequence.upsert({
+        where: { branchId: def.branchId },
+        update: {},
+        create: { id: seqId, organizationId: organization.id, branchId: def.branchId, lastNumber: 1 },
+      });
+      const invoiceNumber = `INV-${String(sequence.lastNumber).padStart(6, '0')}`;
+      const invId = `${id}-invoice`;
+      const invoice = await prisma.invoice.upsert({
+        where: { id: invId },
+        update: {},
+        create: {
+          id: invId,
+          organizationId: organization.id,
+          branchId: def.branchId,
+          orderId: order.id,
+          invoiceNumber,
+          subtotal: subtotal.toFixed(2),
+          taxTotal: taxTotal.toFixed(2),
+          discountTotal: '0.00',
+          total: total.toFixed(2),
+        },
+      });
+      for (const [idx, line] of lineData.entries()) {
+        const invItemId = `${invId}-item-${idx}`;
+        await prisma.invoiceItem.upsert({
+          where: { id: invItemId },
+          update: {},
+          create: {
+            id: invItemId,
+            invoiceId: invoice.id,
+            nameSnapshot: line.itemName,
+            unitPriceSnapshot: line.unitPrice.toFixed(2),
+            quantity: line.quantity,
+            lineTotal: line.lineTotal.toFixed(2),
+            modifiersSummary: line.modifierNames.join(', ') || null,
+          },
+        });
+      }
+      invoiceCount += 1;
+    }
+
+    orderCount += 1;
+  }
+  console.log(`  seeded ${orderCount} orders across DINE_IN/TAKEOUT/DELIVERY and every status, ${invoiceCount} invoice(s)`);
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
