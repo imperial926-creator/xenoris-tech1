@@ -7,7 +7,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 
 const PLACEHOLDER_CARDS = [
   { title: "Today's Revenue", phase: 11, note: 'Requires the accounting ledger (Phase 10) and financial dashboard (Phase 11).' },
-  { title: 'Reservations Today', phase: 3, note: 'Requires the reservations engine.' },
   { title: 'Orders Today', phase: 4, note: 'Requires the order management module.' },
   { title: 'Inventory Alerts', phase: 9, note: 'Requires inventory tracking.' },
   { title: 'AI Business Insights', phase: 13, note: 'Read-only analytics layer, built once real data exists.' },
@@ -15,10 +14,22 @@ const PLACEHOLDER_CARDS = [
 
 export default async function DashboardOverviewPage() {
   const session = requireAuthenticated(await getSession());
-  const [branches, menuItems, tableCount] = await Promise.all([
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfTomorrow = new Date(startOfToday);
+  startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+
+  const [branches, menuItems, tableCount, reservationsToday] = await Promise.all([
     BranchService.list(session.organizationId),
     MenuService.listItems(session.organizationId),
     prisma.restaurantTable.count({ where: { organizationId: session.organizationId } }),
+    prisma.reservation.count({
+      where: {
+        organizationId: session.organizationId,
+        startAt: { gte: startOfToday, lt: startOfTomorrow },
+        status: { notIn: ['CANCELLED', 'NO_SHOW'] },
+      },
+    }),
   ]);
 
   return (
@@ -26,8 +37,8 @@ export default async function DashboardOverviewPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Business Overview</h1>
         <p className="text-sm text-muted-foreground">
-          Phase 1 (foundation) and Phase 2 (tables &amp; menu) are live. Operational and
-          financial modules below activate as each phase ships — see{' '}
+          Phase 1 (foundation), Phase 2 (tables &amp; menu), and Phase 3 (reservations) are live.
+          Operational and financial modules below activate as each phase ships — see{' '}
           <code className="text-xs">CLAUDE.md</code> for status.
         </p>
       </div>
@@ -60,6 +71,17 @@ export default async function DashboardOverviewPage() {
             <p className="text-3xl font-semibold">{tableCount}</p>
             <p className="text-sm text-muted-foreground">tables configured</p>
             <p className="pt-2 text-sm text-muted-foreground">{menuItems.length} menu items</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Reservations Today</CardTitle>
+            <CardDescription>Live data — reservations module (Phase 3)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-semibold">{reservationsToday}</p>
+            <p className="text-sm text-muted-foreground">excluding cancelled / no-show</p>
           </CardContent>
         </Card>
 

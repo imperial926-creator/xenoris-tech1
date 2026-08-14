@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils/cn';
 
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Overview', phase: null },
-  { href: '/dashboard/reservations', label: 'Reservations', phase: 3 },
+  { href: '/dashboard/reservations', label: 'Reservations', phase: null },
   { href: '/dashboard/tables', label: 'Tables', phase: null },
   { href: '/dashboard/menu', label: 'Menu', phase: null },
   { href: '/dashboard/orders', label: 'Orders', phase: 4 },
