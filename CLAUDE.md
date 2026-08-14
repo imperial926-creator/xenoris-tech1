@@ -126,13 +126,11 @@ response. Financial and inventory calculations are never trusted from the client
 **Phase 0 — Discovery: done.** This document, `README.md`, `docs/architecture.md`,
 `docs/database.md` created. Repository was empty at session start.
 
-**Phase 1 — Foundation: in progress / see below for exact scope.**
-Implemented in this pass:
+**Phase 1 — Foundation: done.**
 - Next.js 14 + TypeScript + Tailwind + App Router project structure matching the target folder
   layout.
 - Prisma schema: `Organization`, `Branch`, `User`, `Role`, `Permission`, `RolePermission`,
-  `UserRole`, `AuditLog` (foundation only — no restaurant-domain tables yet, those arrive in later
-  phases).
+  `UserRole`, `AuditLog`.
 - Auth: register/login/logout/me routes, bcrypt hashing, JWT session cookie, `AuthService`.
 - RBAC: seeded roles (`CUSTOMER`, `STAFF`, `MANAGER`, `ACCOUNTANT`, `DRIVER`, `OWNER`,
   `ADMINISTRATOR`), permission model, `requirePermission` middleware helper.
@@ -144,9 +142,39 @@ Implemented in this pass:
 - Unit + integration tests for password hashing, RBAC permission checks, and org/branch tenant
   isolation.
 
-**Not yet built** (Phases 2–16 per `docs/architecture.md`): restaurant configuration (tables,
-menu), reservations, orders, kitchen display, delivery, catering, CRM/RFM, inventory, accounting
-ledger, financial reporting, owner analytics, AI insights, notifications, hardening, deployment.
+**Phase 2 — Restaurant Configuration: done.**
+- Prisma schema additions: `TableSection`, `RestaurantTable` (+ `TableStatus` enum),
+  `TableStatusHistory`, `MenuCategory`, `MenuItem`, `MenuItemVariant`, `MenuModifierGroup` (+
+  `ModifierSelectionType` enum), `MenuModifier`, `MenuItemModifierGroup`. `MenuModifierGroup` is a
+  deliberate addition beyond the spec's literal table list — see `docs/database.md` for why a flat
+  modifier list can't express "choose one Size" vs "choose any Add-ons."
+- Permissions: `table:view`, `table:manage`, `menu:view`, `menu:manage`, granted to
+  STAFF/MANAGER by default (STAFF can view+change table status but not edit the floor plan or
+  menu pricing).
+- `TableService`: sections, tables, and a whitelisted table-status state machine (e.g.
+  `OUT_OF_SERVICE → OCCUPIED` is rejected server-side even if a client requests it), every
+  transition recorded in `table_status_history`.
+- `MenuService`: categories, items (Decimal pricing, never float), variants, modifier groups
+  (SINGLE/MULTIPLE selection), modifiers, item↔modifier-group linking.
+- API routes for all of the above under `/api/branches/[id]/sections`, `/api/branches/[id]/tables`
+  (+ `/status`, `/status-history`), and `/api/menu/**`.
+- Dashboard UI: a live table status board (branch selector, per-table status dropdown, add
+  section/table forms) replacing the Phase 1 placeholder, a menu manager (categories, items,
+  modifier groups/modifiers, item-modifier linking), and a business-hours editor on the Settings
+  page (writes to `Branch.openingHours`, added in Phase 1).
+- Seed data extended: 2 sections × 6 tables per branch (24 tables total), 4 menu categories, 14
+  menu items, 1 variant, 2 modifier groups (Rice Size — required/single-select; Add-ons —
+  multi-select) linked to a sample item.
+- Unit tests: money/price validation (decimal-places, negative rejection), modifier-group
+  selection-type rules, table status enum validation. Integration tests: table creation +
+  status-transition state machine (legal and illegal moves), section delete SET NULL vs table
+  delete CASCADE, menu category/item/variant/modifier CRUD, tenant isolation for both.
+- One real routing bug caught and fixed during Phase 1 while building this phase's nav: see
+  `docs/architecture.md` § 4a.
+
+**Not yet built** (Phases 3–16 per `docs/architecture.md`): reservations, orders, kitchen display,
+delivery, catering, CRM/RFM, inventory, accounting ledger, financial reporting, owner analytics,
+AI insights, notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -155,7 +183,8 @@ ledger, financial reporting, owner analytics, AI insights, notifications, harden
   restaurant organizations on the platform), a login request must disambiguate which organization
   to check credentials against. Phase 1 does this by asking for the organization's own (globally
   unique) contact email. This is functional but not great UX; a friendlier flow (org
-  slug/subdomain, or "look up my organizations by email") is a good Phase 2 candidate.
+  slug/subdomain, or "look up my organizations by email") is still unaddressed — not part of
+  Phase 2's scope, revisit in a later phase.
 
 - **This build environment has no outbound network access to package registries** (npm, pip —
   all return 403). `npm install` could not be run here, so dependencies are declared in
@@ -183,6 +212,18 @@ ledger, financial reporting, owner analytics, AI insights, notifications, harden
     pathless and would have collided with the customer-facing `(customer)/` group's routes (both
     would resolve to bare `/orders`, `/reservations`, etc.). Restructured to a real `app/dashboard/`
     path segment — see `docs/architecture.md` § 4a.
+  - Phase 2 repeated the same verification approach:
+    `prisma/migrations/20260814030000_phase2_tables_menu/migration.sql` was hand-written and
+    applied clean to the same local Postgres instance, then an 11-assertion SQL smoke test
+    verified table-number uniqueness per-branch (not global), the `TableStatus`/
+    `ModifierSelectionType` enums, `table_status_history` allowing a null `fromStatus` on first
+    insert, section-delete-`SET NULL`-vs-table-delete-`CASCADE` semantics, menu category delete
+    being `RESTRICT`ed while items reference it, exact `DECIMAL(10,2)` price storage (no float
+    drift), and modifier group/modifier/item-link wiring including duplicate-link rejection. All
+    passed. The TypeScript syntax pass was re-run across all ~84 files (Phase 1 + 2) and caught
+    one more instance of the same `any`-through-generic-inference quirk as the Phase 1 `roles`
+    fix (this time in `prisma/seed.ts`'s `categoryByName` map) — fixed the same way, with an
+    explicit type annotation instead of relying on inference.
 - Payment, email, SMS, push, storage, maps, and AI providers are all unconfigured placeholders —
   see `.env.example`. No fake integrations were built.
 

@@ -96,8 +96,8 @@ just a corrected URL scheme.
 ## 6. Implementation Phases
 
 0. Discovery (this document) — **done**
-1. Foundation: Next.js/TS/Tailwind, Postgres/Prisma, auth, RBAC, organizations, branches — **in progress, this pass**
-2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers
+1. Foundation: Next.js/TS/Tailwind, Postgres/Prisma, auth, RBAC, organizations, branches — **done**
+2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers — **done, this pass**
 3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests
 4. Orders: dine-in, take-out, delivery, payments, invoices
 5. Kitchen display system
@@ -150,3 +150,21 @@ organizations/branches/users/roles/permissions, authentication, RBAC, org & bran
 minimal dashboard/login UI shell, seed data, and tests for the above. Everything else is
 deliberately deferred to keep each phase reviewable, per the "do not build the entire application
 in one uncontrolled pass" rule.
+
+## 10. Phase 2 — Restaurant Configuration
+
+Built on top of Phase 1 without modifying its schema: table sections, tables (with a whitelisted
+status state machine — see `TableService.ALLOWED_TRANSITIONS`), table status history, business
+hours (via the `Branch.openingHours` field already added in Phase 1, now with a real editor UI),
+and the full menu (categories, items, variants, modifier groups, modifiers, item↔modifier-group
+links). Menu is organization-scoped, not branch-scoped — the spec's field list for `menu_items`
+doesn't include a branch id, so all branches in an organization currently share one menu.
+Per-branch availability overrides are a reasonable future addition, not built here (would need a
+join table like `branch_menu_item_overrides`, deferred until an actual multi-branch customer
+needs it — no fields added speculatively).
+
+Both the table state machine and the menu's decimal pricing were chosen deliberately over looser
+alternatives: table status transitions are validated against a whitelist server-side (a client
+requesting `OUT_OF_SERVICE → OCCUPIED` directly is rejected, not silently allowed), and every
+money field uses Postgres `DECIMAL(10,2)` end to end — verified with a SQL smoke test proving no
+float drift (see `CLAUDE.md` → Known Issues).
