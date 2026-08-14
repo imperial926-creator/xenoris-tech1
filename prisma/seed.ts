@@ -2,10 +2,11 @@
  * Development / demo seed data — clearly not real business data.
  * Run with: npm run db:seed
  *
- * Creates: 1 organization ("Demo"-prefixed), 2 branches, and one user per
- * platform role, each seeded with that role's default permissions. Later
- * phases will extend this file with menu items, tables, reservations, etc.
- * as those tables are introduced — deliberately minimal for Phase 1.
+ * Creates: 1 organization ("[DEMO]"-prefixed), 2 branches, one user per
+ * platform role, table sections/tables per branch, and a starter menu with
+ * categories, items, a variant, and modifier groups. Later phases will
+ * extend this further (reservations, orders, inventory, ...) as those
+ * tables are introduced.
  */
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
@@ -134,6 +135,178 @@ async function main() {
     });
     console.log(`  seeded ${roleName} -> ${email}`);
   }
+
+  // --- Phase 2: table sections + tables, per branch ------------------------
+  for (const branch of [branchA, branchB]) {
+    const sections = await Promise.all(
+      ['Main Dining', 'Patio'].map((name) =>
+        prisma.tableSection.upsert({
+          where: { branchId_name: { branchId: branch.id, name } },
+          update: {},
+          create: { organizationId: organization.id, branchId: branch.id, name },
+        }),
+      ),
+    );
+
+    // 6 tables per section = 12 per branch = 24 total across both branches.
+    for (const section of sections) {
+      for (let i = 1; i <= 6; i++) {
+        const tableNumber = `${section.name === 'Main Dining' ? 'M' : 'P'}${i}`;
+        const table = await prisma.restaurantTable.upsert({
+          where: { branchId_tableNumber: { branchId: branch.id, tableNumber } },
+          update: {},
+          create: {
+            organizationId: organization.id,
+            branchId: branch.id,
+            sectionId: section.id,
+            tableNumber,
+            capacity: i % 3 === 0 ? 8 : i % 2 === 0 ? 2 : 4,
+          },
+        });
+        const historyExists = await prisma.tableStatusHistory.findFirst({
+          where: { tableId: table.id },
+        });
+        if (!historyExists) {
+          await prisma.tableStatusHistory.create({
+            data: { tableId: table.id, fromStatus: null, toStatus: table.status },
+          });
+        }
+      }
+    }
+    console.log(`  seeded ${sections.length} sections / 12 tables -> ${branch.name}`);
+  }
+
+  // --- Phase 2: menu ---------------------------------------------------------
+  const categoryDefs = [
+    { name: '[DEMO] Rice Meals', order: 1 },
+    { name: '[DEMO] Grilled & Barbecue', order: 2 },
+    { name: '[DEMO] Drinks', order: 3 },
+    { name: '[DEMO] Desserts', order: 4 },
+  ];
+  const categories = await Promise.all(
+    categoryDefs.map((c) =>
+      prisma.menuCategory.upsert({
+        where: { organizationId_name: { organizationId: organization.id, name: c.name } },
+        update: {},
+        create: { organizationId: organization.id, name: c.name, displayOrder: c.order },
+      }),
+    ),
+  );
+  const categoryByName = new Map<string, (typeof categories)[number]>();
+  for (const c of categories) categoryByName.set(c.name, c);
+
+  const itemDefs: Array<{
+    category: string;
+    name: string;
+    price: string;
+    cost: string;
+    prep: number;
+  }> = [
+    { category: '[DEMO] Rice Meals', name: 'Chicken Inasal Meal', price: '195.00', cost: '85.00', prep: 12 },
+    { category: '[DEMO] Rice Meals', name: 'Beef Tapa Meal', price: '210.00', cost: '95.00', prep: 12 },
+    { category: '[DEMO] Rice Meals', name: 'Pork Sisig Meal', price: '220.00', cost: '100.00', prep: 15 },
+    { category: '[DEMO] Rice Meals', name: 'Bangus Belly Meal', price: '230.00', cost: '110.00', prep: 15 },
+    { category: '[DEMO] Grilled & Barbecue', name: 'Pork BBQ Skewer (3pc)', price: '150.00', cost: '60.00', prep: 18 },
+    { category: '[DEMO] Grilled & Barbecue', name: 'Grilled Liempo', price: '260.00', cost: '120.00', prep: 20 },
+    { category: '[DEMO] Grilled & Barbecue', name: 'Grilled Bangus', price: '240.00', cost: '115.00', prep: 20 },
+    { category: '[DEMO] Drinks', name: 'Iced Tea', price: '60.00', cost: '15.00', prep: 3 },
+    { category: '[DEMO] Drinks', name: 'Calamansi Juice', price: '65.00', cost: '18.00', prep: 3 },
+    { category: '[DEMO] Drinks', name: 'Bottled Water', price: '40.00', cost: '12.00', prep: 1 },
+    { category: '[DEMO] Drinks', name: 'Soda', price: '55.00', cost: '20.00', prep: 1 },
+    { category: '[DEMO] Desserts', name: 'Halo-Halo', price: '135.00', cost: '55.00', prep: 8 },
+    { category: '[DEMO] Desserts', name: 'Leche Flan', price: '90.00', cost: '35.00', prep: 3 },
+    { category: '[DEMO] Desserts', name: 'Buko Pandan', price: '95.00', cost: '38.00', prep: 5 },
+  ];
+
+  const itemByName = new Map<string, Awaited<ReturnType<typeof prisma.menuItem.create>>>();
+  for (const def of itemDefs) {
+    const category = categoryByName.get(def.category)!;
+    const item = await prisma.menuItem.upsert({
+      where: {
+        // menu_items has no natural unique key besides id — findFirst then
+        // create/skip, since Prisma upsert requires a unique `where`.
+        id: `${organization.id}-item-${def.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+      },
+      update: {},
+      create: {
+        id: `${organization.id}-item-${def.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        organizationId: organization.id,
+        categoryId: category.id,
+        name: def.name,
+        price: def.price,
+        cost: def.cost,
+        preparationTimeMinutes: def.prep,
+      },
+    });
+    itemByName.set(def.name, item);
+  }
+  console.log(`  seeded ${categories.length} categories / ${itemDefs.length} menu items`);
+
+  // One variant, to prove menu_item_variants works end to end.
+  const chickenInasal = itemByName.get('Chicken Inasal Meal')!;
+  await prisma.menuItemVariant.upsert({
+    where: { menuItemId_name: { menuItemId: chickenInasal.id, name: 'Double Order' } },
+    update: {},
+    create: { menuItemId: chickenInasal.id, name: 'Double Order', price: '340.00', cost: '160.00' },
+  });
+
+  // Two modifier groups: "Size" (choose one, required) on rice meals, and
+  // "Add-ons" (choose any) on the same item, to demonstrate both selection
+  // types and their linkage.
+  const sizeGroup = await prisma.menuModifierGroup.upsert({
+    where: { organizationId_name: { organizationId: organization.id, name: 'Rice Size' } },
+    update: {},
+    create: {
+      organizationId: organization.id,
+      name: 'Rice Size',
+      selectionType: 'SINGLE',
+      required: true,
+      minSelect: 1,
+      maxSelect: 1,
+    },
+  });
+  await Promise.all(
+    [
+      { name: 'Regular Rice', priceDelta: '0.00' },
+      { name: 'Extra Rice', priceDelta: '25.00' },
+    ].map((m) =>
+      prisma.menuModifier.upsert({
+        where: { modifierGroupId_name: { modifierGroupId: sizeGroup.id, name: m.name } },
+        update: {},
+        create: { modifierGroupId: sizeGroup.id, name: m.name, priceDelta: m.priceDelta },
+      }),
+    ),
+  );
+
+  const addOnsGroup = await prisma.menuModifierGroup.upsert({
+    where: { organizationId_name: { organizationId: organization.id, name: 'Add-ons' } },
+    update: {},
+    create: { organizationId: organization.id, name: 'Add-ons', selectionType: 'MULTIPLE', minSelect: 0, maxSelect: 3 },
+  });
+  await Promise.all(
+    [
+      { name: 'Extra Egg', priceDelta: '20.00' },
+      { name: 'Extra Sauce', priceDelta: '10.00' },
+    ].map((m) =>
+      prisma.menuModifier.upsert({
+        where: { modifierGroupId_name: { modifierGroupId: addOnsGroup.id, name: m.name } },
+        update: {},
+        create: { modifierGroupId: addOnsGroup.id, name: m.name, priceDelta: m.priceDelta },
+      }),
+    ),
+  );
+
+  for (const group of [sizeGroup, addOnsGroup]) {
+    const existingLink = await prisma.menuItemModifierGroup.findUnique({
+      where: { menuItemId_modifierGroupId: { menuItemId: chickenInasal.id, modifierGroupId: group.id } },
+    });
+    if (!existingLink) {
+      await prisma.menuItemModifierGroup.create({
+        data: { menuItemId: chickenInasal.id, modifierGroupId: group.id },
+      });
+    }
+  }
+  console.log('  seeded 2 modifier groups (Rice Size, Add-ons) linked to Chicken Inasal Meal');
 
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
