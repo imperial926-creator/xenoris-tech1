@@ -36,6 +36,7 @@ model Organization {
   menuCategories     MenuCategory[]
   menuItems          MenuItem[]
   menuModifierGroups MenuModifierGroup[]
+  reservations       Reservation[]
 
   @@map("organizations")
 }
@@ -64,6 +65,7 @@ model Branch {
   auditLogs    AuditLog[]
   tableSections TableSection[]
   tables        RestaurantTable[]
+  reservations  Reservation[]
 
   @@index([organizationId])
   @@map("branches")
@@ -96,6 +98,10 @@ model User {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   userRoles    UserRole[]
   auditLogs    AuditLog[]
+  // Reservations made under this user's account. Optional on the Reservation
+  // side — walk-in/phone bookings have no registered user at all (Phase 8
+  // full CRM identity is a later phase; this is just "was there an account").
+  reservations Reservation[]
 
   // Email is unique per organization, not globally — the same person may be a
   // customer of multiple independent restaurant organizations on the platform.
@@ -259,6 +265,7 @@ model RestaurantTable {
   branch        Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
   section       TableSection?        @relation(fields: [sectionId], references: [id], onDelete: SetNull)
   statusHistory TableStatusHistory[]
+  reservationTables ReservationTable[]
 
   // Table numbers only need to be unique within a branch, not globally —
   // two branches can both have a "Table 1".
@@ -415,4 +422,153 @@ model MenuItemModifierGroup {
   @@unique([menuItemId, modifierGroupId])
   @@index([menuItemId])
   @@map("menu_item_modifier_groups")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Reservations
+// ---------------------------------------------------------------------------
+//
+// Deviations from the spec's literal table list (documented, not silent):
+//
+// 1. No separate `reservation_guests` table. Guest contact info is stored
+//    directly on `Reservation` (guestName/guestEmail/guestPhone) as a
+//    snapshot at booking time, alongside an optional `customerUserId` for
+//    registered accounts. A full CRM guest/customer profile (history,
+//    preferences, tags, RFM segmentation) is Phase 8 — building a real
+//    `customers` table now, before CRM exists to populate/use it, would mean
+//    either leaving it empty or half-implementing Phase 8 early. The
+//    snapshot fields are enough for staff to run service today; Phase 8 can
+//    backfill a `Customer` link onto `Reservation` without a breaking change.
+// 2. No separate `reservation_payments` table. `depositRequired`,
+//    `depositAmount`, `depositStatus`, and `depositNote` live directly on
+//    `Reservation`. Deposits in this phase are recorded manually by staff
+//    (e.g. "cash received, ₱500, confirmed by phone") — there is no payment
+//    gateway integration yet (see docs/architecture.md § Risks). A real
+//    `payments`/`payment_transactions` ledger arrives with Phase 4
+//    (order payments) and Phase 10 (accounting); wiring reservation deposits
+//    into it happens then, not with a placeholder table now.
+//
+// Double-booking prevention: enforced by Postgres itself, not just
+// application logic. `ReservationTable` denormalizes `startAt`/`endAt`/
+// `status` from the parent `Reservation` (kept in sync by
+// `ReservationService` inside the same transaction) specifically so a
+// Postgres `EXCLUDE` constraint can reject overlapping bookings of the same
+// table at the database level. Prisma's schema DSL has no first-class
+// support for EXCLUDE constraints, so it is NOT expressed here — it is
+// hand-written directly into the migration SQL
+// (prisma/migrations/*_phase3_reservations/migration.sql):
+//
+//   CREATE EXTENSION IF NOT EXISTS btree_gist;
+//   ALTER TABLE reservation_tables ADD CONSTRAINT no_double_booking
+//     EXCLUDE USING gist ("tableId" WITH =, tsrange("startAt", "endAt") WITH &&)
+//     WHERE (status NOT IN ('CANCELLED', 'NO_SHOW'));
+//
+// This means `prisma db pull` would not perfectly round-trip this table —
+// documented here and in docs/database.md so it isn't mistaken for drift.
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  SEATED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum ReservationDepositStatus {
+  NONE
+  PENDING
+  PAID
+  REFUNDED
+}
+
+model Reservation {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  // Optional: set when the reservation belongs to a registered account.
+  // Always null for walk-in/phone bookings taken by staff.
+  customerUserId String?
+
+  // Contact snapshot at time of booking — always present, independent of
+  // customerUserId, so staff never need a join to see who they're serving.
+  guestName  String
+  guestEmail String?
+  guestPhone String?
+
+  startAt DateTime
+  endAt   DateTime
+  // Denormalized from startAt/endAt purely so party-size and time-window
+  // queries can filter without a computed column; kept in sync by
+  // ReservationService, never written independently.
+  guestCount Int
+
+  status            ReservationStatus @default(PENDING)
+  specialRequests   String?
+  occasion          String?
+
+  // Deposits are manually recorded by staff in this phase — see file header.
+  depositRequired Boolean                   @default(false)
+  depositAmount   Decimal?                  @db.Decimal(10, 2)
+  depositStatus   ReservationDepositStatus  @default(NONE)
+  depositNote     String?
+
+  cancellationReason String?
+  cancelledAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     User?                @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  tables       ReservationTable[]
+  statusHistory ReservationStatusHistory[]
+
+  @@index([organizationId])
+  @@index([branchId, startAt])
+  @@index([customerUserId])
+  @@map("reservations")
+}
+
+// Join table between Reservation and RestaurantTable. startAt/endAt/status
+// are denormalized copies of the parent Reservation's fields (see file
+// header) — required for the DB-level EXCLUDE constraint that prevents
+// double-booking. ReservationService writes both the parent and this table
+// in the same transaction, so they cannot drift.
+model ReservationTable {
+  id            String            @id @default(cuid())
+  reservationId String
+  tableId       String
+  startAt       DateTime
+  endAt         DateTime
+  status        ReservationStatus
+  createdAt     DateTime          @default(now())
+
+  reservation Reservation     @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  table       RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  // Application-level guard (fast, in-process rejection of an obvious
+  // duplicate link); the real double-booking guard is the DB EXCLUDE
+  // constraint added in migration SQL, which also covers overlapping (not
+  // just identical) time ranges.
+  @@unique([reservationId, tableId])
+  @@index([tableId])
+  @@index([reservationId])
+  @@map("reservation_tables")
+}
+
+model ReservationStatusHistory {
+  id              String            @id @default(cuid())
+  reservationId   String
+  fromStatus      ReservationStatus?
+  toStatus        ReservationStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime          @default(now())
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([reservationId, createdAt])
+  @@map("reservation_status_history")
 }
