@@ -218,7 +218,87 @@ response. Financial and inventory calculations are never trusted from the client
   for the same table/window, asserting exactly one succeeds and the loser fails with the DB's
   `ConflictError`, not a sequential simulation of concurrency.
 
-**Not yet built** (Phases 4–16 per `docs/architecture.md`): orders, kitchen display, delivery,
+**Phase 4 — Orders, Payments, Invoicing: done.**
+- Prisma schema additions: `Order` (+ `OrderType`, `OrderStatus` enums), `OrderItem`,
+  `OrderItemModifier`, `OrderStatusHistory`, `OrderPayment` (+ `OrderPaymentMethod`,
+  `OrderPaymentStatus` enums), `Invoice` (+ `InvoiceStatus` enum), `InvoiceItem`,
+  `InvoiceSequence`. `OrderItem`/`OrderItemModifier` snapshot `nameSnapshot` /
+  `unitPriceSnapshot` / `priceDeltaSnapshot` at order time (same principle as Phase 3's
+  reservation guest-contact snapshot) so later menu edits never rewrite order history. No
+  separate `customers` table — dine-in/take-out/delivery orders can be tied to a `User` via
+  `customerUserId` or captured as a walk-in guest (`guestName`/`guestEmail`/`guestPhone`), same
+  "don't build a table the spec doesn't ask for yet" reasoning as Phase 2's modifier-group
+  decision.
+- **All pricing is computed server-side**, never trusted from the client: `OrderService`
+  resolves menu item/variant/modifier prices from the database and validates modifier-group
+  `required`/`minSelect`/`maxSelect` rules before computing line and order totals with
+  `Prisma.Decimal` arithmetic. A provisional 12% PH VAT (`PROVISIONAL_VAT_RATE`) applies only to
+  `STANDARD`-tax-category items — flagged, like the rest of this codebase's PH tax handling, as
+  needing sign-off from a licensed Philippine accountant before real invoicing.
+- Dine-in orders best-effort auto-transition their table to `OCCUPIED`, reusing `TableService`'s
+  whitelisted status state machine; a table already `OUT_OF_SERVICE`/`CLEANING` rejects the new
+  order. The table's status is re-read *inside* the database transaction (not from a
+  pre-transaction snapshot) to avoid a read-then-write race — see Known Issues below.
+- **Sequential per-branch invoice numbering (`INV-000001`, ...) is race-safe by construction**:
+  `InvoiceService.issueInvoice` does an atomic `upsert` + `{ lastNumber: { increment: 1 } }` on a
+  per-branch `InvoiceSequence` row inside the same transaction as the `Invoice` insert, relying
+  on Postgres row-locking rather than a novel constraint. A different mechanism from Phase 3's
+  double-booking `EXCLUDE` constraint because the guarantee needed is different ("assign the next
+  number safely" vs. "reject an overlapping range") — proven with a genuine
+  `Promise.allSettled` concurrency test, see Known Issues below.
+- **Only one active (non-`VOID`) invoice per order is enforced by the database itself**: a
+  partial unique index (`invoices_one_active_per_order`, `WHERE status != 'VOID'`) has no Prisma
+  schema DSL representation — same category of gap as Phase 3's `EXCLUDE` constraint — hand
+  -written in migration SQL and documented in `schema.prisma`'s comment block and
+  `InvoiceService.translateDbError`.
+- No payment gateway integration exists. `lib/payments/PaymentProvider.ts` defines the
+  `PaymentProvider` interface (`PaymentIntentResult`, `RefundResult`) and an
+  `UnconfiguredPaymentProvider` stub that throws on every method rather than faking success —
+  this closes a documentation gap where `docs/architecture.md` referenced this file since Phase 1
+  but it never actually existed. Payments actually taken today are **manually recorded**
+  (`OrderPayment`, method CASH/CARD/GCASH/MAYA/BANK_TRANSFER/OTHER) the same "staff attests money
+  changed hands" pattern as Phase 3's reservation deposits; `OrderService.paymentSummary`
+  computes `paidAmount = Σ COMPLETED − Σ REFUNDED`, `balanceDue`, and `isFullyPaid` from that
+  ledger.
+- Permissions: no new permission keys were needed — `order:manage` (already existed from Phase 1,
+  already granted to STAFF/MANAGER/OWNER/ADMINISTRATOR) is reused for every order and invoice
+  endpoint.
+- API routes under `/api/branches/[id]/orders` (+ `/[orderId]`, `/[orderId]/status`,
+  `/[orderId]/payments`, `/[orderId]/invoice`) and `/api/branches/[id]/invoices` (+
+  `/[invoiceId]`, `/[invoiceId]/void`).
+- Dashboard UI: an order board (branch/status filters, a new-order form with menu item/variant/
+  modifier selection and a live client-side estimated total, status-transition action buttons
+  driven by the same whitelist as the service layer, inline cancellation-reason capture, payment
+  recording, and an "Issue invoice" action once an order is fully paid) replacing the Phase 1
+  placeholder, plus a new invoice board (branch selector, invoice list with line items, void with
+  inline reason capture). Overview page gained a live "Orders Today" card.
+- Scope boundary: **staff-side order management only** — kitchen display (Phase 5) and delivery
+  dispatch (Phase 6) are explicitly out of scope here, as originally announced. Phase 3's
+  wrap-up note had also floated customer-facing self-service ordering as a Phase 4 candidate;
+  that is explicitly **re-scoped out of Phase 4** given the phase's already-large staff-side
+  surface (schema + pricing engine + state machine + invoicing + concurrency-proven sequencing)
+  and deferred to a later dedicated pass once customer-facing authentication exists — see
+  `docs/architecture.md` § 13 for the full reasoning.
+- Seed data extended: 6 demo orders spanning every status and all three order types across both
+  branches (a fully-paid, invoiced dine-in order; a ready take-out order; a preparing delivery
+  order; a pending dine-in order; a cancelled take-out order; a confirmed dine-in order on the
+  second branch), with hand-computed VAT-inclusive pricing so the numbers are independently
+  checkable.
+- Unit tests: order/payment/invoice validation schemas (delivery-address-required-for-DELIVERY,
+  quantity bounds, payment-method enum, malformed money strings). Integration tests: server-side
+  pricing with exact Decimal snapshot assertions (including variant pricing and modifier
+  totals), cross-org menu item / unlinked-modifier / maxSelect-exceeded rejection, table
+  auto-transition to `OCCUPIED` (including a second order at an already-`OCCUPIED` table
+  succeeding, and an `OUT_OF_SERVICE` table being rejected), the full legal order-status
+  lifecycle, illegal-transition and missing-cancellation-reason rejection, payment recording +
+  refund math, tenant isolation. Invoice tests: unpaid-order rejection, sequential numbering
+  across multiple orders, duplicate-active-invoice rejection, void-then-reissue getting the next
+  number, and — mirroring Phase 3's double-booking concurrency test — a **real concurrent
+  invoice-issuance test** issuing invoices for 5 fully-paid orders on the same branch genuinely
+  simultaneously (`Promise.allSettled`), asserting all 5 succeed with unique, correctly
+  -sequential numbers.
+
+**Not yet built** (Phases 5–16 per `docs/architecture.md`): kitchen display, delivery,
 catering, CRM/RFM, inventory, accounting ledger, financial reporting, owner analytics, AI
 insights, notifications, hardening, deployment.
 
@@ -291,8 +371,38 @@ insights, notifications, hardening, deployment.
     double-booking...") using `Promise.allSettled` on two simultaneous service calls — authored and
     TS-syntax-checked here, not yet runtime-executed for the same `npm install` reason as every
     other test in this repo (see below).
+  - Phase 4 followed the same two-layer approach. `prisma/migrations/20260814050000_phase4_orders/
+    migration.sql` (including the `invoices_one_active_per_order` partial unique index) was
+    hand-written and applied clean to the same local Postgres instance after a mid-session
+    `pg_ctlcluster` restart (the cluster had stopped between turns; verified schema/data were
+    intact before proceeding). A 7-assertion sequential smoke test then verified: exact
+    `DECIMAL(10,2)` order-total round-tripping, an `ON DELETE RESTRICT` foreign key rejecting
+    deletion of a menu item referenced by an order line, cascade delete removing an order's items/
+    status-history/payments, the first invoice for an order issuing as `INV-000001`, a second
+    `ISSUED` invoice for the same order being rejected by the partial unique index, void-then
+    -reissue for the same order being accepted, and a duplicate invoice number within the same
+    branch being rejected. All passed. Then, mirroring Phase 3's two-process concurrency proof but
+    for a different guarantee, a genuine `Promise.allSettled` test issued invoices for 5 fully-paid
+    orders on the same branch truly concurrently (not sequentially) via
+    `InvoiceService.issueInvoice` and asserted all 5 succeeded with unique numbers
+    `INV-000001`..`INV-000005` — real evidence the atomic-`upsert`-based sequence counter holds
+    under a race, the same rigor as Phase 3's `EXCLUDE`-constraint proof applied to "safely assign
+    the next number" instead of "safely reject an overlap." The TypeScript syntax pass was re-run
+    across all 118 files (Phases 1-4) and caught a third occurrence of the same `any`-through
+    -generic-inference quirk as the Phase 1 (`AuthService.roles`) and Phase 2 (`seed.ts`
+    `categoryByName`) fixes — this time in `OrderService.resolveAndPriceItems`'s `menuItemById`
+    map, where `new Map(menuItems.map(...))` inferred `unknown` values because `menuItems` flowed
+    through `any` (unresolved Prisma types from the missing `node_modules`) — fixed identically
+    with an explicit `new Map<string, (typeof menuItems)[number]>(...)` type argument. A real race
+    condition was also caught and fixed during self-review (not by the compiler): `createOrder`
+    originally read a dine-in table's status once *before* opening the `$transaction` and passed
+    that stale snapshot into the auto-seat logic — the same class of TOCTOU bug Phase 3 was careful
+    to avoid for reservations. Fixed by re-reading the table's status *inside* the transaction
+    (`tx.restaurantTable.findUniqueOrThrow`) immediately before deciding whether to transition it.
 - Payment, email, SMS, push, storage, maps, and AI providers are all unconfigured placeholders —
-  see `.env.example`. No fake integrations were built.
+  see `.env.example`. No fake integrations were built. `lib/payments/PaymentProvider.ts` (Phase 4)
+  is the first of these interfaces actually written; the rest remain interface-less placeholders
+  until their phase.
 
 ## Required Environment Variables
 

@@ -107,7 +107,7 @@ branch.
 1. Foundation: Next.js/TS/Tailwind, Postgres/Prisma, auth, RBAC, organizations, branches — **done**
 2. Restaurant configuration: branches detail, tables, sections, business hours, menu, categories, modifiers — **done**
 3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests — **done, this pass**
-4. Orders: dine-in, take-out, delivery, payments, invoices
+4. Orders: dine-in, take-out, delivery, payments, invoices — **done, this pass**
 5. Kitchen display system
 6. Delivery: zones, drivers, assignment, tracking
 7. Catering: inquiry → quote → accept → deposit → event → final payment
@@ -126,10 +126,13 @@ test → typecheck/lint → review → update docs → commit.
 
 ## 7. Risks
 
-- **No payment provider is connected yet.** `lib/payments` defines the `PaymentProvider`
-  interface; a real provider (e.g. a PH-market gateway) must be selected and configured before
-  Phase 4 can accept real money. Flagged for a business decision, not a default I should silently
-  pick given it affects payments/compliance.
+- **No payment provider is connected yet.** `lib/payments/PaymentProvider.ts` (written in Phase 4)
+  defines the `PaymentProvider` interface and an `UnconfiguredPaymentProvider` stub that throws
+  rather than fakes success; a real provider (e.g. a PH-market gateway) must be selected and
+  configured before the platform can accept real electronic payments. Cash/manual payments are
+  already supported today via `OrderPayment` (Phase 4) — staff record that money changed hands,
+  the same way Phase 3 handles reservation deposits. Flagged for a business decision, not a
+  default I should silently pick given it affects payments/compliance.
 - **Philippine tax/accounting compliance is not verified.** The accounting engine is technically
   sound (double-entry, immutable postings) but VAT treatment, official receipt/invoice sequencing,
   and withholding rules need sign-off from a licensed PH accountant before Phase 10 is considered
@@ -210,5 +213,78 @@ Two things were deliberately deferred rather than half-built:
 Scope is also deliberately staff-side only: the dashboard UI under `/dashboard/reservations` lets
 staff search availability and manage bookings, but public customer self-service booking is not
 built here. It needs customer-facing authentication, which doesn't exist yet — the current
-`/register` flow only creates organization-owner accounts — so it's bundled into Phase 4 alongside
-customer-facing ordering rather than building throwaway auth just for this phase.
+`/register` flow only creates organization-owner accounts — Phase 3's own wrap-up floated bundling
+it into Phase 4 alongside customer ordering; § 12 below explains why that didn't happen either.
+
+## 12. Phase 4 — Orders, Payments, Invoicing
+
+Built on top of Phases 1-3: order creation and pricing, a status state machine, manual payment
+recording, and sequential invoicing.
+
+**Server-computed pricing, no exceptions.** `OrderService.resolveAndPriceItems` accepts only IDs
+and quantities from the client — menu item, variant, and modifier prices are always looked up
+fresh from the database, never trusted from the request body. The same method enforces each
+modifier group's `required`/`minSelect`/`maxSelect` rules per order line before any money is
+computed. `OrderItem` and `OrderItemModifier` then snapshot `nameSnapshot`/`unitPriceSnapshot`/
+`priceDeltaSnapshot` onto the order row itself — the same snapshotting principle Phase 3 applied
+to reservation guest contact info — so a later menu price change or item rename never rewrites the
+history of what a customer was actually charged. A provisional 12% PH VAT applies only to
+`STANDARD`-tax-category lines; this rate is a placeholder, not a configured, accountant-approved
+figure (see § 7 Risks).
+
+**Table auto-transition reuses Phase 2's state machine, with one race fixed.** A new dine-in order
+best-effort transitions its table to `OCCUPIED` via `TableService`'s existing whitelist (a table
+that's `OUT_OF_SERVICE` or `CLEANING` rejects the order instead of silently seating it). The first
+implementation read the table's current status once before opening the database transaction and
+passed that snapshot into the seating logic — a classic time-of-check-to-time-of-use race, the
+same category of bug Phase 3 was careful to avoid for double-booking. It was caught during
+self-review (not by a test failing) and fixed by re-reading the table's status *inside* the
+transaction, immediately before deciding whether to seat it, so the decision is always made
+against the latest committed state.
+
+**Invoicing needed a different concurrency mechanism than Phase 3's, because it's a different
+guarantee.** Reservations needed "reject any overlap" (solved with a Postgres `EXCLUDE`
+constraint). Invoicing needs "hand out the next number safely, with no gaps skipped and no
+duplicates" — a monotonic counter, not an overlap check. `InvoiceService.issueInvoice` solves this
+with an atomic `upsert` on a per-branch `InvoiceSequence` row (`lastNumber: { increment: 1 }`)
+inside the same transaction as the `Invoice` insert, relying on Postgres's own row-locking on the
+UPDATE path rather than a novel constraint. This was proven under genuine concurrency the same way
+Phase 3's constraint was: a `Promise.allSettled` test issues invoices for 5 fully-paid orders on
+one branch truly simultaneously and asserts all 5 succeed with unique, correctly sequential
+numbers (see `CLAUDE.md` → Known Issues for the full run). Separately, "at most one active invoice
+per order" is enforced by a partial unique index
+(`invoices_one_active_per_order ... WHERE status != 'VOID'`) — like Phase 3's `EXCLUDE`
+constraint, this has no Prisma schema DSL representation and is hand-written directly into
+migration SQL.
+
+**No payment gateway, by design (see § 7 Risks).** `lib/payments/PaymentProvider.ts` is written
+this phase — closing a gap where `docs/architecture.md` had referenced this interface since Phase
+1 without the file actually existing — but its only implementation is
+`UnconfiguredPaymentProvider`, which throws on every method rather than faking a successful
+charge. Payments actually taken today go through `OrderPayment`: staff record that cash/card/
+e-wallet money changed hands, exactly the same "attestation, not a fake gateway" pattern Phase 3
+used for reservation deposits. `OrderService.paymentSummary` derives `paidAmount`, `balanceDue`,
+and `isFullyPaid` from that ledger (`Σ COMPLETED − Σ REFUNDED`), and an order must be fully paid
+before `InvoiceService.issueInvoice` will issue against it.
+
+**Scope boundary, and a deliberate re-scoping from what Phase 3 announced.** This phase is
+staff-side order management only — kitchen display (Phase 5) and delivery dispatch (Phase 6) were
+explicitly out of scope from the start. Phase 3's wrap-up, however, had also floated public
+customer self-service ordering (and the customer-facing authentication it needs) as riding along
+with Phase 4. On reflection that combination was too much for one reviewable pass: Phase 4's
+staff-side surface alone is a full pricing engine, a state machine, manual payments, and a
+concurrency-proven invoicing sequence. Building customer-facing auth and a storefront ordering UI
+in the same pass would have meant rushing one of the two, or growing this phase well past the
+"do not build the entire application in one uncontrolled pass" rule from § 6. Customer self
+-service ordering is therefore explicitly re-scoped out of Phase 4 and deferred to its own later,
+dedicated pass, once customer-facing authentication is designed on its own terms rather than
+bolted on as a side effect of the orders schema. Two further things were deliberately deferred
+rather than half-built:
+
+- **No dedicated payments/transactions ledger table beyond `OrderPayment`.** A real accounting
+  ledger (`journal_entries`/`journal_entry_lines`) is Phase 10 — `OrderPayment` records what staff
+  attest happened; it does not post double-entry accounting movements. Wiring order payments and
+  invoices into the general ledger happens once Phase 10 exists.
+- **No refund-to-original-payment-method automation.** A `REFUNDED` `OrderPayment` row is a manual
+  record (same as a `COMPLETED` one) — there is no gateway to actually reverse a charge through,
+  since no gateway is connected yet.

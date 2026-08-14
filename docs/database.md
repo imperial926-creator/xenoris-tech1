@@ -139,13 +139,97 @@ passes. Verified with a genuine two-process concurrent `psql` test, not just seq
 no representation in `schema.prisma`, `prisma db pull` would not perfectly round-trip
 `reservation_tables` — noted here so that's understood as a deliberate, documented gap, not drift.
 
+## Phase 4 Schema
+
+### Order / OrderItem / OrderItemModifier / OrderStatusHistory
+Branch-scoped. `Order`: `id, organizationId, branchId, type (OrderType), status (OrderStatus),
+customerUserId?, guestName?, guestEmail?, guestPhone?, tableId?, reservationId?,
+deliveryAddress?, subtotal, taxTotal, discountTotal, total (all Decimal), notes?,
+cancellationReason?, cancelledAt?`. Like `Reservation`, there is no separate `customers` table —
+a registered customer is linked via `customerUserId`, a walk-in/phone/delivery order captures a
+guest-contact snapshot directly on the row. `tableId` is required in practice for `DINE_IN`
+orders and optional otherwise (enforced in `OrderService`/Zod, not a DB constraint, since the
+legal combinations depend on `type`); `reservationId` optionally links a dine-in order back to the
+reservation that seated it.
+
+`OrderType` enum: `DINE_IN, TAKEOUT, DELIVERY`. `OrderStatus` enum: `PENDING, CONFIRMED,
+PREPARING, READY, COMPLETED, CANCELLED` — legal transitions are whitelisted in
+`OrderService.ALLOWED_TRANSITIONS`, the same pattern as `TableStatus`/`ReservationStatus`.
+
+`OrderItem`: `id, orderId, menuItemId (FK, ON DELETE RESTRICT), menuItemVariantId? (FK, ON DELETE
+RESTRICT), nameSnapshot, unitPriceSnapshot, quantity, lineSubtotal, modifiersTotal, lineTotal,
+notes?`. `OrderItemModifier`: `id, orderItemId, modifierId (FK, ON DELETE RESTRICT),
+nameSnapshot, priceDeltaSnapshot`. Both FKs to the menu are `RESTRICT`, not `CASCADE` or
+`SET NULL` — a menu item/variant/modifier that has ever been ordered cannot be deleted (the menu
+UI should soft-delete via `available: false` / `deletedAt` instead); this is what actually makes
+the `nameSnapshot`/`*PriceSnapshot` fields meaningful as permanent order history rather than just
+a cache. `OrderStatusHistory` mirrors `TableStatusHistory`/`ReservationStatusHistory`: append-only,
+one row per status change including creation (`fromStatus = null`).
+
+### OrderPayment
+`id, orderId, method (OrderPaymentMethod), amount (Decimal), status (OrderPaymentStatus), note?,
+recordedByUserId?`. `OrderPaymentMethod` enum: `CASH, CARD, GCASH, MAYA, BANK_TRANSFER, OTHER`.
+`OrderPaymentStatus` enum: `PENDING, COMPLETED, REFUNDED`. No payment-gateway fields
+(`providerTransactionId`, etc.) — every row here is a staff attestation that money changed hands
+by some external means, the same "no separate `reservation_payments` table, deposit is staff
+-recorded" decision Phase 3 made for `Reservation.depositStatus`. `OrderService.paymentSummary`
+computes `paidAmount = Σ(amount WHERE status=COMPLETED) − Σ(amount WHERE status=REFUNDED)`,
+`balanceDue = order.total − paidAmount`, `isFullyPaid = balanceDue <= 0`, entirely in application
+code — there's no generated/materialized column for it.
+
+### Invoice / InvoiceItem / InvoiceSequence
+`Invoice`: `id, organizationId, branchId, orderId (FK, ON DELETE RESTRICT), invoiceNumber, status
+(InvoiceStatus), subtotal, taxTotal, discountTotal, total (Decimal snapshots of the order at
+issuance time), issuedAt, voidedAt?, voidReason?`. `@@unique([branchId, invoiceNumber])` — invoice
+numbers are unique per branch, not globally (each branch has its own sequence, matching how a
+real restaurant's official receipt books work). The order FK is `RESTRICT`, not `CASCADE`: an
+order that has ever been invoiced cannot be deleted out from under its invoice.
+
+`InvoiceItem`: `id, invoiceId, nameSnapshot, unitPriceSnapshot, quantity, lineTotal,
+modifiersSummary?`. Deliberately **not** a nested modifier table — `modifiersSummary` is a
+flattened, human-readable string (e.g. `"Cheese, No Onion"`) built at issuance time from the
+order's own `OrderItemModifier` rows. A real invoice line item exists to be printed/emailed
+exactly as issued; re-normalizing it into a queryable modifier structure would just be
+`OrderItemModifier` duplicated for no benefit, since the source of truth for "what was ordered"
+is always the `Order`/`OrderItem` tree, not the invoice.
+
+`InvoiceStatus` enum: `ISSUED, VOID`. There is no `PAID`/`SENT`/`OVERDUE` status — an invoice can
+only be issued once an order is already fully paid (checked in `InvoiceService.issueInvoice` via
+`OrderService.paymentSummary`), so an invoice in this system is a paid-order receipt, not an
+accounts-receivable document; that distinction will matter once Phase 10's accounting ledger and
+any future "invoice now, pay later" flow exist.
+
+`InvoiceSequence`: `id, branchId (@unique), lastNumber (default 0)`. One row per branch, advanced
+atomically (`upsert` + `increment`) inside the same transaction as the `Invoice` insert it's
+generating a number for — see § "Sequential invoice numbering" below.
+
+### One active invoice per order (DB-enforced) and sequential numbering
+`invoices` carries a hand-written (not Prisma-DSL-expressible) partial unique index:
+
+```sql
+CREATE UNIQUE INDEX "invoices_one_active_per_order" ON "invoices" ("orderId")
+  WHERE (status != 'VOID');
+```
+
+This allows an order to have at most one non-`VOID` invoice at a time, while still permitting a
+void-then-reissue history (each reissue gets a new row and a new number; the old one stays around
+as a permanent `VOID` record). As with Phase 3's `EXCLUDE` constraint, `prisma db pull` would not
+perfectly round-trip this index — documented here, in `schema.prisma`'s Phase 4 comment block, and
+in `InvoiceService.translateDbError` as a deliberate, known gap.
+
+Sequential numbering (`INV-000001`, `INV-000002`, ...) is **not** `orderId`-derived or
+timestamp-derived — it comes from `InvoiceSequence.lastNumber`, advanced via an atomic
+`upsert(... update: { lastNumber: { increment: 1 } })` inside the same transaction that inserts
+the `Invoice` row, relying on Postgres's own row-level locking on the `UPDATE` path (a different
+mechanism from the `EXCLUDE` constraint above, because "assign the next number, no gaps, no
+duplicates" is a different guarantee than "reject an overlapping range"). Verified under genuine
+concurrent load — see `CLAUDE.md` → Known Issues.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 4: `orders`, `order_items`, `order_item_modifiers`, `order_status_history`, `invoices`,
-  `invoice_items`, `invoice_sequences`
 - Phase 6: `delivery_zones`, `delivery_orders`, `drivers`, `driver_assignments`,
   `delivery_status_history`
 - Phase 7: `catering_inquiries`, `catering_packages`, `catering_quotes`, `catering_quote_items`,
