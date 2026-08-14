@@ -522,6 +522,11 @@ async function main() {
     payment?: { method: 'CASH' | 'CARD' | 'GCASH' | 'MAYA' | 'BANK_TRANSFER' | 'OTHER'; note?: string };
     cancellationReason?: string;
     issueInvoice?: boolean;
+    // Phase 5: optional "have this ready by" time, offset from seed time
+    // (see `now` below) the same way reservation offsets are computed, so
+    // the kitchen board has one overdue and one on-time example without
+    // hand-editing timestamps that would go stale.
+    requiredAtOffsetMinutes?: number;
   }
 
   const orderDefs: SeedOrder[] = [
@@ -550,6 +555,9 @@ async function main() {
         { itemName: 'Beef Tapa Meal', quantity: 1 },
         { itemName: 'Bottled Water', quantity: 1 },
       ],
+      // Was needed 20 minutes ago and is still sitting READY — the kitchen
+      // board's overdue indicator should be visibly triggered by this one.
+      requiredAtOffsetMinutes: -20,
     },
     {
       slug: 'delivery-preparing',
@@ -564,6 +572,8 @@ async function main() {
         { itemName: 'Pork Sisig Meal', quantity: 1 },
         { itemName: 'Soda', quantity: 1 },
       ],
+      // Still on time — the kitchen board should NOT flag this one.
+      requiredAtOffsetMinutes: 30,
     },
     {
       slug: 'dine-in-pending',
@@ -665,6 +675,10 @@ async function main() {
         total: total.toFixed(2),
         cancellationReason: def.cancellationReason,
         cancelledAt: def.status === 'CANCELLED' ? now : undefined,
+        requiredAt:
+          def.requiredAtOffsetMinutes !== undefined
+            ? new Date(now.getTime() + def.requiredAtOffsetMinutes * 60 * 1000)
+            : undefined,
       },
     });
 
