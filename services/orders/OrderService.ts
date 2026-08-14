@@ -39,6 +39,7 @@ const ORDER_INCLUDE = {
   items: { include: { modifiers: true, menuItem: true, variant: true } },
   payments: true,
   table: true,
+  delivery: { include: { deliveryZone: true, driver: true } },
 } satisfies Prisma.OrderInclude;
 
 export class OrderService {
@@ -127,6 +128,21 @@ export class OrderService {
       if (!customer) throw new NotFoundError('Customer account');
     }
 
+    // Phase 6: an optional delivery zone, whose CURRENT fee is snapshotted
+    // onto both the order (so total/payments/invoices are correct — see
+    // schema.prisma's Phase 6 comment) and the companion DeliveryOrder
+    // created below. Not required — a delivery order can be placed without
+    // a zone; deliveryFee simply stays 0 until one is assigned later.
+    let deliveryFee = new Prisma.Decimal(0);
+    if (input.deliveryZoneId) {
+      const zone = await prisma.deliveryZone.findFirst({
+        where: { id: input.deliveryZoneId, organizationId, branchId },
+      });
+      if (!zone) throw new NotFoundError('Delivery zone');
+      if (!zone.active) throw new ConflictError(`Delivery zone "${zone.name}" is not currently active.`);
+      deliveryFee = new Prisma.Decimal(zone.deliveryFee as never);
+    }
+
     // Same parse-and-validate pattern as ReservationService.resolveWindow's
     // startAt — a loose string in, a real Date (or undefined) out.
     let requiredAt: Date | undefined;
@@ -138,7 +154,7 @@ export class OrderService {
     }
 
     const resolvedItems = await this.resolveAndPriceItems(organizationId, input.items);
-    const totals = this.computeOrderTotals(resolvedItems, input.discountAmount);
+    const totals = this.computeOrderTotals(resolvedItems, input.discountAmount, deliveryFee);
 
     try {
       return await prisma.$transaction(async (tx) => {
@@ -163,6 +179,7 @@ export class OrderService {
             subtotal: totals.subtotal.toFixed(2),
             taxTotal: totals.taxTotal.toFixed(2),
             discountTotal: totals.discountTotal.toFixed(2),
+            deliveryFee: totals.deliveryFee.toFixed(2),
             total: totals.total.toFixed(2),
           },
         });
@@ -197,6 +214,25 @@ export class OrderService {
         await tx.orderStatusHistory.create({
           data: { orderId: order.id, fromStatus: null, toStatus: order.status, changedByUserId: actorUserId },
         });
+
+        // Phase 6: a DELIVERY order always gets a companion DeliveryOrder,
+        // created here in the same transaction as the order itself — see
+        // schema.prisma's "Phase 6 — Delivery" comment for why this is a
+        // separate 1:1 table rather than fields bolted onto Order.
+        if (input.type === 'DELIVERY') {
+          const deliveryOrder = await tx.deliveryOrder.create({
+            data: {
+              organizationId,
+              branchId,
+              orderId: order.id,
+              deliveryZoneId: input.deliveryZoneId,
+              deliveryFee: totals.deliveryFee.toFixed(2),
+            },
+          });
+          await tx.deliveryStatusHistory.create({
+            data: { deliveryOrderId: deliveryOrder.id, fromStatus: null, toStatus: deliveryOrder.status, changedByUserId: actorUserId },
+          });
+        }
 
         await writeAuditLog(tx, {
           organizationId,
@@ -406,6 +442,7 @@ export class OrderService {
   private static computeOrderTotals(
     resolvedItems: Array<{ lineTotal: Prisma.Decimal; taxCategory: string }>,
     discountAmountInput: string,
+    deliveryFee: Prisma.Decimal = new Prisma.Decimal(0),
   ) {
     const subtotal = resolvedItems.reduce((sum, i) => sum.plus(i.lineTotal), new Prisma.Decimal(0));
     const taxableBase = resolvedItems
@@ -413,8 +450,11 @@ export class OrderService {
       .reduce((sum, i) => sum.plus(i.lineTotal), new Prisma.Decimal(0));
     const taxTotal = taxableBase.times(PROVISIONAL_VAT_RATE);
     const discountTotal = new Prisma.Decimal(discountAmountInput);
-    const total = subtotal.minus(discountTotal).plus(taxTotal);
-    return { subtotal, taxTotal, discountTotal, total };
+    // Delivery fee is not part of the taxable food subtotal — it's added
+    // straight into the total the customer owes (see schema.prisma's
+    // Phase 6 comment for why it's snapshotted here at all).
+    const total = subtotal.minus(discountTotal).plus(taxTotal).plus(deliveryFee);
+    return { subtotal, taxTotal, discountTotal, deliveryFee, total };
   }
 
   // --- table integration ------------------------------------------------

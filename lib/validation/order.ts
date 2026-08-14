@@ -25,6 +25,10 @@ export const createOrderSchema = z
     tableId: z.string().trim().min(1).optional(),
     reservationId: z.string().trim().min(1).optional(),
     deliveryAddress: z.string().trim().min(1).max(400).optional(),
+    // DELIVERY only, optional — if given, its current fee is snapshotted
+    // onto the order and a companion DeliveryOrder is created (Phase 6).
+    // Omit to place a delivery order without categorizing a zone yet.
+    deliveryZoneId: z.string().trim().min(1).optional(),
     customerUserId: z.string().trim().min(1).optional(),
     guestName: z.string().trim().max(150).optional(),
     guestEmail: z.string().trim().toLowerCase().email().optional(),
