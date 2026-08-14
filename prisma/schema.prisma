@@ -624,6 +624,29 @@ model ReservationStatusHistory {
 //    race — verified with a concurrent test the same way Phase 3's
 //    double-booking constraint was, just for "assign the next number
 //    safely" instead of "reject an overlapping range."
+//
+// ---------------------------------------------------------------------------
+// Phase 5 — Kitchen Display System
+// ---------------------------------------------------------------------------
+//
+// The master spec's Kitchen Display section (§20) lists NO new tables — it
+// asks for "a kitchen dashboard" where kitchen staff see new orders and move
+// them through NEW → ACCEPTED → PREPARING → READY. That is deliberately NOT
+// modeled as a second status enum here: it is the exact same lifecycle
+// `OrderStatus` already implements (NEW=PENDING, ACCEPTED=CONFIRMED,
+// PREPARING=PREPARING, READY=READY), just presented with kitchen-facing
+// labels and filtered to the kitchen-relevant subset. `COMPLETED` (order
+// picked up/served) and `CANCELLED` stay front-of-house/whole-order concerns
+// already built in Phase 4 — the kitchen's job ends at READY. Building a
+// parallel `KitchenTicketStatus` enum synced to `OrderStatus` would be two
+// sources of truth for one state machine; `KitchenService` instead reads
+// `Order`/`OrderItem` directly and delegates every transition back to
+// `OrderService.updateStatus`, so the whitelisted transition table has
+// exactly one implementation. The only new column is `Order.requiredAt`
+// (see that field's comment above) for the spec's "Required time" — every
+// other kitchen-board field (order number = `Order.id`, items, modifiers,
+// special instructions = `Order.notes`/`OrderItem.notes`, table/order type,
+// current status) already exists on `Order`/`OrderItem`.
 
 enum OrderType {
   DINE_IN
@@ -692,6 +715,14 @@ model Order {
   notes              String?
   cancellationReason String?
   cancelledAt        DateTime?
+
+  // Phase 5 (Kitchen Display System) — optional "have this ready by" time,
+  // set at order creation (e.g. a delivery pickup window or a table's
+  // requested timing). Null means "as soon as possible", the default for
+  // most walk-in dine-in/take-out orders. Purely informational: it drives
+  // the kitchen board's overdue indicator, it does not gate or auto-cancel
+  // anything.
+  requiredAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
