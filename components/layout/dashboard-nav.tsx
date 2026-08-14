@@ -11,7 +11,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/menu', label: 'Menu', phase: null },
   { href: '/dashboard/orders', label: 'Orders', phase: null },
   { href: '/dashboard/invoices', label: 'Invoices', phase: null },
-  { href: '/dashboard/kitchen', label: 'Kitchen', phase: 5 },
+  { href: '/dashboard/kitchen', label: 'Kitchen', phase: null },
   { href: '/dashboard/catering', label: 'Catering', phase: 7 },
   { href: '/dashboard/customers', label: 'Customers', phase: 8 },
   { href: '/dashboard/inventory', label: 'Inventory', phase: 9 },

@@ -18,7 +18,7 @@ export default async function DashboardOverviewPage() {
   const startOfTomorrow = new Date(startOfToday);
   startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
 
-  const [branches, menuItems, tableCount, reservationsToday, ordersToday] = await Promise.all([
+  const [branches, menuItems, tableCount, reservationsToday, ordersToday, kitchenQueueCount] = await Promise.all([
     BranchService.list(session.organizationId),
     MenuService.listItems(session.organizationId),
     prisma.restaurantTable.count({ where: { organizationId: session.organizationId } }),
@@ -36,6 +36,12 @@ export default async function DashboardOverviewPage() {
         status: { not: 'CANCELLED' },
       },
     }),
+    prisma.order.count({
+      where: {
+        organizationId: session.organizationId,
+        status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] },
+      },
+    }),
   ]);
 
   return (
@@ -43,9 +49,10 @@ export default async function DashboardOverviewPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Business Overview</h1>
         <p className="text-sm text-muted-foreground">
-          Phase 1 (foundation), Phase 2 (tables &amp; menu), Phase 3 (reservations), and Phase 4
-          (orders, payments &amp; invoicing) are live. Operational and financial modules below
-          activate as each phase ships — see <code className="text-xs">CLAUDE.md</code> for status.
+          Phase 1 (foundation), Phase 2 (tables &amp; menu), Phase 3 (reservations), Phase 4
+          (orders, payments &amp; invoicing), and Phase 5 (kitchen display) are live. Operational
+          and financial modules below activate as each phase ships — see{' '}
+          <code className="text-xs">CLAUDE.md</code> for status.
         </p>
       </div>
 
@@ -99,6 +106,17 @@ export default async function DashboardOverviewPage() {
           <CardContent>
             <p className="text-3xl font-semibold">{ordersToday}</p>
             <p className="text-sm text-muted-foreground">excluding cancelled</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Kitchen Queue</CardTitle>
+            <CardDescription>Live data — kitchen display system (Phase 5)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-semibold">{kitchenQueueCount}</p>
+            <p className="text-sm text-muted-foreground">tickets from new through ready</p>
           </CardContent>
         </Card>
 
