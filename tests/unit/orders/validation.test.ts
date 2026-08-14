@@ -50,6 +50,21 @@ describe('createOrderSchema', () => {
   it('rejects a malformed discount amount', () => {
     expect(createOrderSchema.safeParse({ ...base, discountAmount: 'free' }).success).toBe(false);
   });
+
+  it('accepts an order with no requiredAt (ASAP)', () => {
+    expect(createOrderSchema.safeParse(base).success).toBe(true);
+    expect(createOrderSchema.parse(base).requiredAt).toBeUndefined();
+  });
+
+  it('accepts an order with a requiredAt string, passed through unparsed', () => {
+    const result = createOrderSchema.safeParse({ ...base, requiredAt: '2026-08-14T18:30:00.000Z' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.requiredAt).toBe('2026-08-14T18:30:00.000Z');
+  });
+
+  it('rejects an empty requiredAt string', () => {
+    expect(createOrderSchema.safeParse({ ...base, requiredAt: '' }).success).toBe(false);
+  });
 });
 
 describe('updateOrderStatusSchema', () => {
