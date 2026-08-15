@@ -13,11 +13,13 @@ live ticket board, required-time tracking), Phase 6 (delivery: zones, driver pro
 dispatch/reassignment with a full audit trail, driver-scoped "my deliveries" view, delivery fee
 folded into the order total), Phase 7 (catering: inquiry → quote → accept → deposit → event →
 final payment funnel, server-computed quote totals, staff-recorded quote/event status lifecycle),
-and Phase 8 (CRM: customer profiles with addresses/preferences/notes/tags/reviews, lifetime-value
+Phase 8 (CRM: customer profiles with addresses/preferences/notes/tags/reviews, lifetime-value
 analytics, live-computed RFM segmentation with configurable thresholds, explicit customer linking
-on orders/reservations/catering) are implemented. Everything else (inventory, accounting,
-reporting, analytics, AI, notifications) is not built yet — see `docs/architecture.md` for the
-phase order.
+on orders/reservations/catering), and Phase 9 (inventory: units with conversion, ingredients,
+recipes linked to menu items, branch-scoped stock with a full transaction ledger, purchasing,
+stock counts, waste, recipe-based consumption on order completion, COGS) are implemented.
+Everything else (accounting, reporting, analytics, AI, notifications) is not built yet — see
+`docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or

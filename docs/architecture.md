@@ -555,3 +555,110 @@ customer-facing review submission form, no rating-invitation email, and no moder
 Every review in this build is a staff member entering a rating/comment on a customer's behalf
 ("customer mentioned they loved the food"), the same "staff acts on the customer's behalf" pattern
 already established for catering quote transitions in Phase 7.
+
+## 17. Phase 9 — Inventory
+
+Master spec §13 describes ingredients/recipes ("menu sales must be capable of triggering
+inventory consumption according to the recipe"); §14 describes inventory (ingredients, units,
+recipes, suppliers, purchase orders, stock counts, waste, and the seven-value transaction-type
+list this build implements verbatim, plus "never silently alter inventory quantities — every
+adjustment must have an audit trail"); §37 describes the finance-integration rules purchase/
+consumption/waste should eventually drive (deferred to Phase 10's ledger — this phase builds the
+real quantity/cost tracking those rules will read from, not the journal entries themselves).
+
+**Two scoping tiers, mirroring the Phase 2 `MenuItem`/`RestaurantTable` split.** The catalog —
+what an ingredient *is*, what a recipe calls for — is organization-scoped: `Unit`, `Ingredient`,
+`Recipe`, `RecipeItem`. The same Chicken ingredient and the same Chicken Inasal recipe apply at
+every branch. What's actually on the shelf right now is a per-location fact, so the operational
+tier is branch-scoped: `InventoryItem` (the stock line itself), `InventoryTransaction` (the
+ledger), `PurchaseOrder`/`PurchaseOrderItem`, `StockCount`/`StockCountItem`, `WasteRecord`.
+`Supplier` sits in between — a supplier serves the whole business, not one branch, so it's
+org-scoped even though the `PurchaseOrder` rows that reference it are branch-scoped, the same way
+`Ingredient` is org-scoped while the `InventoryItem` rows that track its stock are branch-scoped.
+
+**Unit conversion is a deliberately scoped single-level chain, not a general conversion graph.**
+A restaurant buys chicken by the kilogram and a recipe calls for grams; without any conversion
+support at all, every ingredient would need its stock unit and every recipe's unit to match
+exactly, which doesn't reflect how kitchens actually work. Building a fully general N-level unit
+graph (with unit families, dimensional analysis, etc.) is real scope this phase does not need: a
+"base" unit (`baseUnitId = null`) and any number of "derived" units that each point directly at
+one base unit with a `conversionFactor` covers every real case in the master spec (mass: kg/g,
+volume: L/ml, count: piece) without the complexity of a general graph. `lib/inventory/units.ts`
+implements this as pure, DB-free arithmetic (`convertQuantity`, `assertSingleLevelChain`),
+independently unit-tested, the same "algorithm lives outside the service, testable without a
+database" discipline `lib/crm/rfm.ts` established in Phase 8. Converting between units that don't
+share a root base (grams to milliliters, without knowing the ingredient's density) throws rather
+than silently guessing — this is a real scope boundary, not an oversight, and is worth revisiting
+only if a future phase needs density-aware conversions.
+
+**The audit-trail guarantee lives at the transaction-write layer, not as a policy.** Master spec
+§14 says "never silently alter inventory quantities... every adjustment must have an audit trail."
+Rather than trusting every call site to remember to write a matching `InventoryTransaction` row,
+`InventoryService` funnels every single stock-quantity change — the very first balance on a new
+`InventoryItem` included — through one private method, `applyTransaction`, which is the only place
+`quantityOnHand` is ever written. It uses Prisma's atomic `increment` update (`SET quantityOnHand
+= quantityOnHand + $delta` at the database level) instead of "read the current value, compute the
+new one, write it back," so it can't race under concurrent writes to the same stock line, and it
+always creates the matching ledger row inside the same database transaction as the balance change.
+This makes the audit-trail guarantee a structural property of the code (there is no other path to
+change the number) rather than a convention every future call site has to remember to follow.
+
+**Consumption vs. transfer: an intentional asymmetry in whether stock can go negative.**
+`quantityOnHand` is allowed to go negative for `SALE_CONSUMPTION`, `WASTE`, and `ADJUSTMENT` — all
+three represent something that has already physically happened (a dish was made and served, an
+ingredient was wasted, a correction was recorded), and refusing to record it because the ledger
+disagrees would make the ledger *less* accurate, not more. `transferStock` is the one exception:
+it checks the source branch has sufficient stock and throws `ConflictError` if not, refusing the
+operation outright. The distinction is that a transfer is a *decision* staff are making right now
+("move 8kg of chicken from Branch A to Branch B"), not a record of something that already occurred
+— it is reasonable, even correct, to stop staff from transferring stock a branch doesn't actually
+have. Both behaviors are documented in code comments at their call sites, specifically so a future
+maintainer doesn't "fix" the asymmetry into consistency.
+
+**Recipe consumption triggers on order completion, not order creation**, wired into
+`OrderService.updateStatus`'s existing transaction only when the target status is `COMPLETED` —
+the one terminal, never-reversed state in the order lifecycle (`ALLOWED_TRANSITIONS.COMPLETED` is
+empty). This mirrors the "one business event, one transaction" pattern Phase 6 established for
+Order→DeliveryOrder creation and Phase 7 established for CateringQuote ACCEPTED→CateringEvent
+creation: `InventoryService.consumeForOrder` accepts the transaction client OrderService already
+has open (`tx: Prisma.TransactionClient`) rather than opening a second one, so an order completion
+and its ingredient consumption either both commit or both roll back together. Consumption is
+deliberately **best-effort**: a menu item with no recipe, a recipe ingredient with no
+`InventoryItem` at that specific branch, or a recipe unit that can't convert to the ingredient's
+stock unit are all silently skipped inside the loop rather than thrown. The reasoning is the same
+"a customer's order must never fail because of a back-office data gap" principle Phase 6 applied
+to delivery-zone lookups: a kitchen finishing and serving a real dish is the actual business event
+that must succeed; whether the inventory catalog happens to be fully configured for every
+ingredient on that menu item is a separate concern staff can fix later, and a stricter ("throw if
+anything's missing") design would have made a config gap in a rarely-ordered side dish capable of
+blocking every order that included it.
+
+**Stock count corrections use the current balance, not the count's opening snapshot** — worth
+calling out because the wrong choice here is subtly plausible. `createStockCount` snapshots every
+`InventoryItem`'s `quantityOnHand` into each line's `expectedQuantity` at the moment the count
+opens. It would be natural to assume the eventual correction should be `counted - expectedQuantity`
+— but a stock count can stay open for a while (a physical count of a whole walk-in takes real
+time), and other transactions (a sale, a delivery) can and do happen during that window. If the
+correction used the stale `expectedQuantity` snapshot as its baseline, it would silently undo those
+intervening, entirely legitimate transactions. `completeStockCount` instead re-reads each
+`InventoryItem`'s *current* `quantityOnHand` at the moment each line is recorded and bases the
+`COUNT_CORRECTION` delta on that (`counted - current`), leaving `expectedQuantity` on the row purely
+as a variance-reporting artifact ("how much drifted since this count opened"). Covered by an
+integration test that deliberately fires an adjustment between opening and completing a count, to
+prove the correction reflects the post-adjustment balance rather than the stale snapshot.
+
+Permissions: no new grant — `inventory:manage` already existed in Phase 1's forward-looking
+catalog, MANAGER-only (not STAFF), mirroring `catering:manage`'s precedent that back-of-house
+purchasing/stock functions sit above the routine order/reservation/table work STAFF handles
+directly.
+
+Scope boundary, stated plainly: recipes are defined at the `MenuItem` level, not per-variant or
+per-modifier (a "Large" chicken inasal and a "Regular" one consume the same recipe quantities in
+this build). This is a real simplification — a genuinely size-aware kitchen would want more
+chicken for the Large — but modeling variant/modifier-level recipe overrides is meaningfully more
+schema and UI complexity than this phase's scope justifies; revisit if a future phase's owner
+dashboard needs food-cost accuracy at that granularity. Similarly, the finance side of master spec
+§37 (purchase → AP/cash, consumption → COGS journal entries, waste → expense journal entries) is
+explicitly Phase 10's job — this phase builds the real, auditable quantity and cost data those
+journal entries will read from (`getCogsForOrder`, `Ingredient.costPerUnit`, `InventoryTransaction.
+unitCostAtTime`), not the double-entry postings themselves.

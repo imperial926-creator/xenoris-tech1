@@ -436,14 +436,100 @@ value's `rfmThresholds` key can override any subset of the six RFM threshold fie
 merged field-by-field by `lib/crm/rfm.ts`'s `resolveRfmThresholds` (a malformed or out-of-range
 override for one field silently falls back to that field's own default).
 
+## Phase 9 Schema
+
+### Unit
+`id, organizationId, name, abbreviation, baseUnitId? (self-FK "UnitConversion", ON DELETE
+RESTRICT), conversionFactor (Decimal(14,6), default 1)`. Organization-scoped. `baseUnitId = null`
+means this is a base unit (kg, L, pc); a non-null `baseUnitId` means this unit is derived from
+that base, with `conversionFactor` = how many of this unit equal one of the base (e.g.
+`Gram.conversionFactor = 1000`). Depth is capped at one level (a derived unit's own base must
+itself be a base unit) — enforced in `lib/inventory/units.ts`/`InventoryService`, not the
+database. `@@unique([organizationId, abbreviation])`.
+
+### Ingredient
+`id, organizationId, name, stockUnitId (FK to Unit, ON DELETE RESTRICT), costPerUnit
+(Decimal(12,4), default 0), active (default true)`. Organization-scoped catalog entry — "Chicken"
+means the same thing at every branch; how much of it is on hand does not. `costPerUnit` reflects
+the most recent purchase price ("last purchase cost wins"), updated by
+`InventoryService.receivePurchaseOrderItems` on every PO receipt.
+
+### Recipe / RecipeItem
+`Recipe`: `id, organizationId, menuItemId (@unique, FK to MenuItem, ON DELETE CASCADE),
+yieldQuantity (Decimal(10,2), default 1), notes?`. One recipe per menu item (defined at the item
+level, not per-variant/modifier — see `docs/architecture.md` § 17's scope-boundary note).
+`RecipeItem`: `id, recipeId (ON DELETE CASCADE), ingredientId (ON DELETE RESTRICT), quantity
+(Decimal(12,4)), unitId (ON DELETE RESTRICT)`. `@@unique([recipeId, ingredientId])` — an ingredient
+may only appear once per recipe; `InventoryService.assertRecipeItemsValid` rejects a duplicate
+before the DB constraint is even reached.
+
+### InventoryItem
+`id, organizationId, branchId (ON DELETE CASCADE), ingredientId (ON DELETE RESTRICT),
+quantityOnHand (Decimal(14,4), default 0), reorderPoint? (Decimal(14,4)), criticalPoint?
+(Decimal(14,4))`. Branch-scoped — the real stock line. `@@unique([branchId, ingredientId])` — one
+stock line per ingredient per branch. `quantityOnHand` is written exactly once, by
+`InventoryService`'s private `applyTransaction` helper, via Prisma's atomic `increment` operator
+(never read-then-write) — see `docs/architecture.md` § 17. `reorderPoint`/`criticalPoint` are
+independently nullable thresholds driving the `OK`/`LOW`/`CRITICAL` classification
+(`InventoryService.stockLevel`); `criticalPoint` may not exceed `reorderPoint` when both are set.
+
+### InventoryTransaction
+`id, organizationId, branchId (ON DELETE CASCADE), inventoryItemId (ON DELETE CASCADE), type
+(InventoryTransactionType), quantityDelta (Decimal(14,4)), quantityAfter (Decimal(14,4)),
+unitCostAtTime? (Decimal(12,4)), referenceType?, referenceId?, note?, recordedByUserId? (ON DELETE
+SET NULL), createdAt`. The append-only ledger — every single change to any `InventoryItem`'s
+`quantityOnHand` produces exactly one row here, in the same database transaction as the balance
+change. `InventoryTransactionType` enum: `PURCHASE, SALE_CONSUMPTION, WASTE, ADJUSTMENT, RETURN,
+TRANSFER, COUNT_CORRECTION` — the seven values master spec §14 lists verbatim, all real reachable
+code paths (see `docs/architecture.md` § 17 for which service method produces each). `referenceType`/
+`referenceId` loosely link back to the record that caused the transaction (a `PurchaseOrder`, an
+`Order`, a `WasteRecord`, a `StockCount`) without a typed polymorphic FK. Indexed on
+`[inventoryItemId, createdAt]` (running-balance queries) and `[referenceType, referenceId]`
+(look up every transaction a given order/PO/count produced).
+
+### Supplier
+`id, organizationId, name, contactName?, email?, phone?, address?, active (default true)`.
+Organization-scoped — a supplier serves the whole business, not one branch, unlike the
+`PurchaseOrder` rows that reference it. `@@unique([organizationId, name])`.
+
+### PurchaseOrder / PurchaseOrderItem
+`PurchaseOrder`: `id, organizationId, branchId (ON DELETE CASCADE), supplierId (ON DELETE
+RESTRICT), status (PurchaseOrderStatus, default DRAFT), total (Decimal(12,2), default 0),
+expectedAt?, submittedAt?, receivedAt?, notes?, cancellationReason?, createdByUserId? (ON DELETE
+SET NULL)`. `PurchaseOrderStatus` enum: `DRAFT, SUBMITTED, PARTIALLY_RECEIVED, RECEIVED,
+CANCELLED`. Only a `DRAFT` order may be edited or submitted; only `SUBMITTED`/`PARTIALLY_RECEIVED`
+may receive stock; only `DRAFT`/`SUBMITTED` may be cancelled. `PurchaseOrderItem`: `id,
+purchaseOrderId (ON DELETE CASCADE), ingredientId (ON DELETE RESTRICT), unitId (ON DELETE
+RESTRICT), quantityOrdered (Decimal(14,4)), quantityReceived (Decimal(14,4), default 0), unitCost
+(Decimal(12,4)), lineTotal (Decimal(12,2))`. Receiving is partial-first-class:
+`quantityReceived` accumulates across multiple receipts, and the order only becomes `RECEIVED`
+once every line is fully received. The PO's ordering unit does not need to match the ingredient's
+stock unit — `InventoryService.receivePurchaseOrderItems` converts via `lib/inventory/units.ts` and
+derives `costPerStockUnit` from the receipt's own numbers to avoid compounding conversion rounding.
+
+### StockCount / StockCountItem
+`StockCount`: `id, organizationId, branchId (ON DELETE CASCADE), status (StockCountStatus, default
+OPEN), notes?, recordedByUserId? (ON DELETE SET NULL), completedAt?`. `StockCountStatus` enum:
+`OPEN, COMPLETED, CANCELLED`. `StockCountItem`: `id, stockCountId (ON DELETE CASCADE),
+inventoryItemId (ON DELETE RESTRICT), expectedQuantity (Decimal(14,4)), countedQuantity?
+(Decimal(14,4))`. `@@unique([stockCountId, inventoryItemId])`. Opening a count snapshots every
+current `InventoryItem.quantityOnHand` at the branch into `expectedQuantity` — but that snapshot is
+used for variance *reporting* only; the `COUNT_CORRECTION` transaction `completeStockCount` writes
+is based on each item's *current* `quantityOnHand` at completion time, not this stale open-time
+value — see `docs/architecture.md` § 17 for why. A count only flips to `COMPLETED` once every line
+has a non-null `countedQuantity`; partial completion is supported and leaves it `OPEN`.
+
+### WasteRecord
+`id, organizationId, branchId (ON DELETE CASCADE), inventoryItemId (ON DELETE RESTRICT), quantity
+(Decimal(14,4)), reason, recordedByUserId? (ON DELETE SET NULL), createdAt`. Each waste record
+pairs with exactly one `WASTE` `InventoryTransaction` (negative `quantityDelta`, `unitCostAtTime`
+stamped from the ingredient's current `costPerUnit` at time of waste).
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 9: `ingredients`, `units`, `recipes`, `recipe_items`, `inventory_items`,
-  `inventory_transactions`, `stock_counts`, `waste_records`, `suppliers`, `purchase_orders`,
-  `purchase_order_items`
 - Phase 10: `chart_of_accounts`, `accounting_periods`, `journal_entries`, `journal_entry_lines`,
   `financial_transactions`, `payments`, `payment_transactions`, `refunds`, `payment_webhooks`,
   `expenses`, `expense_categories`, `vendors`, `expense_attachments`

@@ -550,7 +550,104 @@ response. Financial and inventory calculations are never trusted from the client
   regression test (`tests/unit/crm/rfm.test.ts`, "classifies a single very large transaction as
   HIGH_VALUE, not NEW") plus the integration-level walk-through above.
 
-**Not yet built** (Phases 9–16 per `docs/architecture.md`): inventory, accounting ledger, financial
+**Phase 9 — Inventory: done.**
+- Prisma schema additions: two scoping tiers, matching the established `MenuItem` (org-scoped
+  catalog) vs. `RestaurantTable` (branch-scoped operational) split from Phase 2. Catalog tier
+  (org-scoped — same definitions apply everywhere): `Unit`, `Ingredient`, `Recipe`, `RecipeItem`.
+  Operational tier (branch-scoped — actual stock is a per-location fact): `InventoryItem`,
+  `InventoryTransaction`, `Supplier` (org-scoped, since one supplier serves the whole business),
+  `PurchaseOrder`, `PurchaseOrderItem`, `StockCount`, `StockCountItem`, `WasteRecord`; plus
+  `InventoryTransactionType`, `PurchaseOrderStatus`, and `StockCountStatus` enums. See the
+  "Phase 9 — Inventory" comment block in `schema.prisma` for the six numbered design decisions in
+  full; the short version below.
+- `lib/inventory/units.ts` implements a deliberately-scoped single-level unit conversion chain
+  (`convertQuantity`, `assertSingleLevelChain`) as a pure, DB-free function — same "the algorithm
+  is testable in isolation" discipline as `lib/crm/rfm.ts`. A "base" unit has `baseUnitId = null`;
+  a "derived" unit points at exactly one base unit with a `conversionFactor` (e.g.
+  `Gram.conversionFactor = 1000`, `Gram.baseUnitId = Kilogram.id`). Depth is capped at 1 — a
+  derived unit's own base must itself be a base unit — enforced here and in `InventoryService`,
+  not the database; converting between units that don't share a root base (grams to milliliters,
+  say) throws, since nothing in this schema records ingredient density.
+- `InventoryService` is the only code path that ever writes `quantityOnHand`, via a private
+  `applyTransaction` helper using Prisma's atomic `increment` operator (race-safe by construction,
+  no read-then-write) that always creates a matching `InventoryTransaction` row in the same DB
+  transaction — "never silently alter inventory quantities... every adjustment must have an audit
+  trail" (master spec §14) is true at the transaction level, not just by convention. All seven
+  spec'd transaction types are real, reachable code paths: `PURCHASE` (PO receiving),
+  `SALE_CONSUMPTION` (recipe-based, on order completion), `WASTE` (`recordWaste`),
+  `ADJUSTMENT`/`RETURN` (`recordAdjustment`, signed manual correction), `TRANSFER`
+  (`transferStock`, two linked transactions across branches), `COUNT_CORRECTION` (stock count
+  completion). `quantityOnHand` is allowed to go negative for consumption/waste/adjustment
+  (something that already physically happened must never be blocked by the ledger) —
+  **except `transferStock`, which uniquely checks sufficient source stock and refuses if there
+  isn't enough**, since a transfer is a deliberate two-sided action staff is choosing to take
+  right now, not a fact about the past. This asymmetry is deliberate and documented in code, not
+  an oversight.
+- Recipe-based consumption is wired into `OrderService.updateStatus`'s existing transaction,
+  triggered only on the `COMPLETED` transition (the one terminal, never-reversed state) — not at
+  order creation — via `InventoryService.consumeForOrder(tx, ...)`, which accepts the already-open
+  Prisma transaction client rather than opening its own (the same "one business event, one
+  transaction" discipline as Phase 6's Order→DeliveryOrder and Phase 7's
+  CateringQuote→CateringEvent side effects). Deliberately best-effort: an order item whose menu
+  item has no recipe, a recipe ingredient with no `InventoryItem` at that branch, or an
+  incompatible recipe-unit/stock-unit conversion are all silently skipped rather than thrown —
+  completing a food order must never be blocked by an inventory catalog/config gap.
+  `InventoryService.getCogsForOrder` sums the real ingredient cost of an order's
+  `SALE_CONSUMPTION` rows — this phase's slice of master spec §37's "ingredient consumption ->
+  COGS increases" (the full double-entry journal-entry side of §37 is Phase 10's job).
+  `PurchaseOrder` receiving derives `costPerStockUnit` from the receipt's own numbers
+  (`(receivedQty × unitCost) / convertedQtyInStockUnit`, avoiding compounded conversion rounding)
+  and updates `Ingredient.costPerUnit` on every receipt — "last purchase cost wins."
+- A subtle correctness decision worth calling out: `completeStockCount`'s `COUNT_CORRECTION`
+  transaction is based on the **current** `quantityOnHand` at completion time, not the open-time
+  `expectedQuantity` snapshot taken when the count started. `expectedQuantity` stays on the row
+  purely for variance *reporting* (how much drifted since the count opened); the actual correction
+  must reflect reality at completion time so any transactions that happened during the counting
+  window (a sale, a delivery) aren't silently erased by a stale snapshot-based delta. Covered by an
+  explicit integration test that simulates exactly this — an adjustment fired between count-open
+  and count-complete — asserting the correction uses the post-adjustment balance, not the snapshot.
+- Permissions: no new grant needed — `inventory:manage` already existed in Phase 1's
+  forward-looking catalog, already MANAGER-only (not STAFF), mirroring `catering:manage`'s
+  precedent (inventory/purchasing treated as a back-of-house/management function). All 24 new API
+  routes gate on this single permission (no separate `inventory:view`).
+- API routes: org-scoped catalog under `/api/units` (+ `/[unitId]`), `/api/ingredients` (+
+  `/[ingredientId]`), `/api/recipes` (+ `/[recipeId]`, `/by-menu-item/[menuItemId]`),
+  `/api/suppliers` (+ `/[supplierId]`); branch-scoped operational under
+  `/api/branches/[id]/inventory/...` — `items` (+ `/[itemId]`, `/adjustments`, `/waste`),
+  `low-stock`, `transfers`, `purchase-orders` (+ `/[poId]`, `/submit`, `/receive`, `/cancel`),
+  `stock-counts` (+ `/[countId]`, `/complete`, `/cancel`), `cogs`.
+- Dashboard UI: an Inventory board (`/dashboard/inventory`) with a branch selector and four
+  sections — Stock (current levels with inline adjustment/waste/transfer forms), Catalog (units,
+  ingredients, recipe builder per menu item), Purchasing (suppliers, PO builder, submit/receive
+  per-line/cancel actions), Counts (open/complete stock counts). Overview page gained a live
+  "Inventory Alerts" card (`InventoryService.getLowStockCount`, org-wide across branches — Prisma
+  has no column-to-column comparison for `quantityOnHand <= reorderPoint`, so this filters in
+  application code).
+- Seed data extended: 5 units (kg/g, L/ml, pc), 4 ingredients (Chicken, Rice, Inasal Marinade,
+  Disposable Cup), 2 recipes (Chicken Inasal Meal, Iced Tea) linked to existing menu items, 4
+  branch-A stock lines (Disposable Cup deliberately seeded below its reorder point so the
+  dashboard's low-stock card has a real item to show), one supplier with a fully-received purchase
+  order (demonstrating `PURCHASE` + last-purchase-cost-wins), one `WASTE` record, and one completed
+  `StockCount` with a real variance correction.
+- Unit tests: `lib/inventory/units.ts`'s `convertQuantity` (same-unit passthrough, base↔derived
+  conversion both directions, incompatible-unit rejection, zero-quantity, number/Decimal/string
+  inputs) and `assertSingleLevelChain` (valid depth-1 chain accepted, depth-2 chain rejected); every
+  `lib/validation/inventory.ts` schema. Integration tests (`InventoryService`): Unit/Ingredient/
+  Recipe CRUD + tenant isolation + duplicate-ingredient-in-recipe rejection; `InventoryItem`
+  creation's guaranteed initial `ADJUSTMENT` transaction (including a zero-quantity starting
+  balance); `recordAdjustment`/`recordWaste` with exact-Decimal running-balance assertions,
+  including going negative; `transferStock` (success, insufficient-stock rejection, same-branch
+  rejection); Supplier CRUD; the full `PurchaseOrder` lifecycle (create DRAFT → submit → partially
+  receive → fully receive) with exact `lineTotal`/`total` math, a receipt ordered in a unit
+  different from the ingredient's stock unit (grams ordered, kilograms stocked) proving the
+  conversion and derived cost-per-stock-unit are exact, and "last purchase cost wins"; `StockCount`
+  lifecycle including the current-balance-not-stale-snapshot correction test described above and a
+  partial-count-stays-OPEN case; `consumeForOrder`/`getCogsForOrder` exercised through a real
+  `OrderService.createOrder` + four `updateStatus` calls to `COMPLETED`, asserting exact
+  unit-converted ingredient consumption and COGS, plus the two silent-skip cases (no recipe, no
+  `InventoryItem` at that branch); `getLowStockItems`/`getLowStockCount` threshold classification.
+
+**Not yet built** (Phases 10–16 per `docs/architecture.md`): accounting ledger, financial
 reporting, owner analytics, AI insights, notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
@@ -758,6 +855,40 @@ reporting, owner analytics, AI insights, notifications, hardening, deployment.
   No `TS2322` key-prop diagnostic appeared — `customer-board.tsx`'s list renders (customers,
   addresses, preferences, tags, notes, reviews, favorite products) all render their `.map()` rows
   inline, same discipline as Phases 6-7.
+  Phase 9's migration (`prisma/migrations/20260815060000_phase9_inventory/migration.sql`) adds
+  three enums and eleven new tables (`units`, `ingredients`, `recipes`, `recipe_items`,
+  `inventory_items`, `inventory_transactions`, `suppliers`, `purchase_orders`,
+  `purchase_order_items`, `stock_counts`, `stock_count_items`, `waste_records`); hand-written and
+  applied clean to both the dev and test local Postgres databases. A 12-assertion smoke test
+  verified: the kg/g unit conversion chain; a duplicate unit abbreviation per organization
+  rejected; deleting a unit referenced by an ingredient blocked (`RESTRICT`); an `InventoryItem` +
+  initial `ADJUSTMENT` transaction with an exact running-balance assertion after a
+  `SALE_CONSUMPTION`; `quantityOnHand` allowed to go negative; a duplicate `InventoryItem` for the
+  same `(branch, ingredient)` pair rejected; deleting a referenced `Ingredient` blocked; deleting
+  an `InventoryItem` cascading its transaction rows; `PurchaseOrder`/`PurchaseOrderItem` exact
+  arithmetic plus deleting a `Supplier` with an existing PO blocked; and an undocumented
+  `InventoryTransactionType` value rejected by the enum type. All passed. This session's copy of
+  `/root` has mode `700` (root-only traversal), so the `postgres` OS user cannot read migration or
+  smoke-test files directly under `/root/restaurant-platform/...` via `psql -f` — every `psql -f`
+  call this phase first copied the file to `/tmp` (`cp ... /tmp/x.sql && chmod 644 /tmp/x.sql`)
+  before running it from there; worth knowing if a future phase hits the same "Permission denied"
+  reading a file that plainly exists. The `git stash -u` before/after TypeScript diff (checked out
+  to the pre-Phase-9 commit `6e67b0f`, re-ran `tsc --noEmit`, checked back out to the tip)
+  confirmed the same result as every prior phase: baseline was 1,745 diagnostics, after Phase 9 was
+  2,180 — 435 more, entirely inside already-established categories (`TS7026` +242, `TS7006` +157,
+  `TS2307` +35, `TS2882` +1 — one new `server-only` import in `InventoryService.ts`, the identical
+  pattern every other service file hits). Zero new diagnostic categories. The two pre-existing
+  non-artifact diagnostics (`TS2345` in `app/dashboard/layout.tsx`, `TS18046` in
+  `lib/utils/api-error.ts`) are unchanged from every prior phase's count — confirmed still not
+  something Phase 9 touched or introduced. No `TS2322` key-prop diagnostic appeared —
+  `inventory-board.tsx`'s list renders (stock lines, units, ingredients, recipes, suppliers,
+  purchase orders, stock counts) all render their `.map()` rows inline, same discipline as Phases
+  6-8. Also note: this sandbox has no `.env`/`.env.test` files by default (they are gitignored /
+  never committed) — running the seed script or the Vitest suite for real in a fresh environment
+  needs them recreated from `.env.example`/`.env.test.example` first, same as every prior phase;
+  they were recreated transiently in this sandbox only to confirm the local Postgres password,
+  then removed again since `node_modules` doesn't exist here to actually execute anything against
+  them (see the entry above).
 
 ## Required Environment Variables
 
