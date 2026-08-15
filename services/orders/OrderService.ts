@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
+import { InventoryService } from '@/services/inventory/InventoryService';
 import type {
   CreateOrderInput,
   ListOrdersQueryInput,
@@ -295,6 +296,28 @@ export class OrderService {
           note: input.note,
         },
       });
+
+      // Phase 9 — Inventory. A completed order is the point at which food
+      // was actually served, so recipe-based ingredient consumption is
+      // triggered here, not at order creation — a PENDING/CONFIRMED/etc.
+      // order can still be CANCELLED, and COMPLETED is the one terminal
+      // state that never reverses (see ALLOWED_TRANSITIONS above), so
+      // there is never a need to "undo" a consumption that shouldn't have
+      // happened. Runs inside this same transaction (one business event,
+      // one transaction, matching Phase 6/7's Order→DeliveryOrder and
+      // CateringQuote→CateringEvent side effects) and is best-effort —
+      // see InventoryService.consumeForOrder for why it never blocks an
+      // order from completing.
+      if (input.status === 'COMPLETED') {
+        await InventoryService.consumeForOrder(
+          tx,
+          organizationId,
+          branchId,
+          orderId,
+          order.items.map((item) => ({ menuItemId: item.menuItemId, quantity: item.quantity })),
+          actorUserId,
+        );
+      }
 
       await writeAuditLog(tx, {
         organizationId,
