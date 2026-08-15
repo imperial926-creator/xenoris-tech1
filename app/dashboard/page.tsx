@@ -2,12 +2,12 @@ import { getSession } from '@/lib/auth/session';
 import { requireAuthenticated } from '@/lib/auth/rbac';
 import { BranchService } from '@/services/branches/BranchService';
 import { MenuService } from '@/services/menu/MenuService';
+import { InventoryService } from '@/services/inventory/InventoryService';
 import { prisma } from '@/lib/db/prisma';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 const PLACEHOLDER_CARDS = [
   { title: "Today's Revenue", phase: 11, note: 'Requires the accounting ledger (Phase 10) and financial dashboard (Phase 11).' },
-  { title: 'Inventory Alerts', phase: 9, note: 'Requires inventory tracking.' },
   { title: 'AI Business Insights', phase: 13, note: 'Read-only analytics layer, built once real data exists.' },
 ];
 
@@ -18,7 +18,7 @@ export default async function DashboardOverviewPage() {
   const startOfTomorrow = new Date(startOfToday);
   startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
 
-  const [branches, menuItems, tableCount, reservationsToday, ordersToday, kitchenQueueCount, activeDeliveriesCount, upcomingCateringEvents, totalCustomers] = await Promise.all([
+  const [branches, menuItems, tableCount, reservationsToday, ordersToday, kitchenQueueCount, activeDeliveriesCount, upcomingCateringEvents, totalCustomers, lowStockCount] = await Promise.all([
     BranchService.list(session.organizationId),
     MenuService.listItems(session.organizationId),
     prisma.restaurantTable.count({ where: { organizationId: session.organizationId } }),
@@ -55,6 +55,7 @@ export default async function DashboardOverviewPage() {
       },
     }),
     prisma.customer.count({ where: { organizationId: session.organizationId } }),
+    InventoryService.getLowStockCount(session.organizationId),
   ]);
 
   return (
@@ -64,8 +65,9 @@ export default async function DashboardOverviewPage() {
         <p className="text-sm text-muted-foreground">
           Phase 1 (foundation), Phase 2 (tables &amp; menu), Phase 3 (reservations), Phase 4
           (orders, payments &amp; invoicing), Phase 5 (kitchen display), Phase 6 (delivery),
-          Phase 7 (catering), and Phase 8 (CRM) are live. Operational and financial modules below
-          activate as each phase ships — see <code className="text-xs">CLAUDE.md</code> for status.
+          Phase 7 (catering), Phase 8 (CRM), and Phase 9 (inventory) are live. Operational and
+          financial modules below activate as each phase ships — see{' '}
+          <code className="text-xs">CLAUDE.md</code> for status.
         </p>
       </div>
 
@@ -163,6 +165,17 @@ export default async function DashboardOverviewPage() {
           <CardContent>
             <p className="text-3xl font-semibold">{totalCustomers}</p>
             <p className="text-sm text-muted-foreground">profiles on file</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Inventory Alerts</CardTitle>
+            <CardDescription>Live data — inventory module (Phase 9)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-3xl font-semibold">{lowStockCount}</p>
+            <p className="text-sm text-muted-foreground">stock lines at or below their reorder point</p>
           </CardContent>
         </Card>
 
