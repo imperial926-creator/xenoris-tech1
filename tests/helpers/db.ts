@@ -15,6 +15,15 @@ export async function resetDatabase() {
   await prisma.deliveryOrder.deleteMany();
   await prisma.driver.deleteMany();
   await prisma.deliveryZone.deleteMany();
+  // Phase 7 — catering. Deleted before users/branches, since
+  // cateringEvent/cateringInquiry reference user (customerUserId).
+  await prisma.cateringPayment.deleteMany();
+  await prisma.cateringEventItem.deleteMany();
+  await prisma.cateringEvent.deleteMany();
+  await prisma.cateringQuoteItem.deleteMany();
+  await prisma.cateringQuote.deleteMany();
+  await prisma.cateringInquiry.deleteMany();
+  await prisma.cateringPackage.deleteMany();
   await prisma.invoiceItem.deleteMany();
   await prisma.invoice.deleteMany();
   await prisma.invoiceSequence.deleteMany();
