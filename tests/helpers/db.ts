@@ -7,6 +7,24 @@ import { prisma } from '@/lib/db/prisma';
  */
 export async function resetDatabase() {
   await prisma.auditLog.deleteMany();
+  // Phase 9 — inventory. Deleted first (before menuItem/branch/organization/
+  // user further down): wasteRecord/stockCountItem/inventoryTransaction all
+  // reference inventoryItem, so those go before it; purchaseOrderItem
+  // references purchaseOrder; recipeItem references recipe (which in turn
+  // references menuItem, still alive at this point); ingredient references
+  // its stockUnit (a Unit, RESTRICT), so ingredients go before units.
+  await prisma.wasteRecord.deleteMany();
+  await prisma.stockCountItem.deleteMany();
+  await prisma.stockCount.deleteMany();
+  await prisma.inventoryTransaction.deleteMany();
+  await prisma.purchaseOrderItem.deleteMany();
+  await prisma.purchaseOrder.deleteMany();
+  await prisma.supplier.deleteMany();
+  await prisma.inventoryItem.deleteMany();
+  await prisma.recipeItem.deleteMany();
+  await prisma.recipe.deleteMany();
+  await prisma.ingredient.deleteMany();
+  await prisma.unit.deleteMany();
   // Phase 8 — CRM. Deleted first: customerReview references order/
   // reservation/cateringEvent/customer/branch/organization/user, and
   // customer itself is referenced (SET NULL, not blocking) from orders/
