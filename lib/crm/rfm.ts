@@ -65,30 +65,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function resolveRfmThresholds(crmSettings: unknown): RfmThresholds {
   const overrides =
     isRecord(crmSettings) && isRecord(crmSettings.rfmThresholds) ? crmSettings.rfmThresholds : {};
-  const result: RfmThresholds = { ...DEFAULT_RFM_THRESHOLDS };
 
-  const numericKeys: Array<keyof RfmThresholds> = [
-    'inactiveDays',
-    'atRiskDays',
-    'regularMinTransactions',
-    'vipMinTransactions',
-  ];
-  for (const key of numericKeys) {
+  // Written as explicit per-field assignments rather than a generic
+  // "loop over keyof RfmThresholds" — a mapped/indexed assignment across a
+  // union of heterogeneous field types (some number, some string) doesn't
+  // type-check soundly in TypeScript even with full type information, so
+  // this avoids that class of issue entirely rather than reaching for an
+  // `as any` escape hatch.
+  const numericOverride = (key: keyof RfmThresholds, current: number): number => {
     const value = overrides[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-      result[key] = value;
-    }
-  }
-
-  const moneyKeys: Array<keyof RfmThresholds> = ['vipMinSpend', 'highValueMinSpend'];
-  for (const key of moneyKeys) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : current;
+  };
+  const moneyOverride = (key: keyof RfmThresholds, current: string): string => {
     const value = overrides[key];
-    if (typeof value === 'string' && /^\d+(\.\d{1,2})?$/.test(value)) {
-      result[key] = value;
-    }
-  }
+    return typeof value === 'string' && /^\d+(\.\d{1,2})?$/.test(value) ? value : current;
+  };
 
-  return result;
+  return {
+    inactiveDays: numericOverride('inactiveDays', DEFAULT_RFM_THRESHOLDS.inactiveDays),
+    atRiskDays: numericOverride('atRiskDays', DEFAULT_RFM_THRESHOLDS.atRiskDays),
+    regularMinTransactions: numericOverride('regularMinTransactions', DEFAULT_RFM_THRESHOLDS.regularMinTransactions),
+    vipMinTransactions: numericOverride('vipMinTransactions', DEFAULT_RFM_THRESHOLDS.vipMinTransactions),
+    vipMinSpend: moneyOverride('vipMinSpend', DEFAULT_RFM_THRESHOLDS.vipMinSpend),
+    highValueMinSpend: moneyOverride('highValueMinSpend', DEFAULT_RFM_THRESHOLDS.highValueMinSpend),
+  };
 }
 
 export interface RfmMetrics {
@@ -105,18 +105,22 @@ export interface RfmMetrics {
  * Deterministic, single-label segment classification — evaluated in a fixed
  * precedence order (first match wins), not scored/weighted across axes.
  * Precedence, most to least specific:
- *   1. frequency <= 1              -> NEW (no history yet, or a single
- *      first-ever transaction — still in the acquisition step)
- *   2. monetary >= highValueMinSpend -> HIGH_VALUE (a huge spender
- *      regardless of frequency/recency — e.g. one large catering event)
- *   3. recency >= inactiveDays     -> INACTIVE (long dormant)
- *   4. recency >= atRiskDays       -> AT_RISK (used to be active, now going
+ *   1. monetary >= highValueMinSpend -> HIGH_VALUE (a huge spender
+ *      regardless of frequency/recency — e.g. a single large catering
+ *      event on a customer's very first transaction). Checked before NEW
+ *      on purpose: one enormous transaction is a stronger, more specific
+ *      signal than "this is their first," and should not be masked by it.
+ *   2. frequency <= 1               -> NEW (no history yet, or a single
+ *      first-ever transaction that wasn't large enough to be HIGH_VALUE —
+ *      still in the acquisition step)
+ *   3. recency >= inactiveDays      -> INACTIVE (long dormant)
+ *   4. recency >= atRiskDays        -> AT_RISK (used to be active, now going
  *      quiet, but not yet fully inactive)
  *   5. frequency >= vipMinTransactions AND monetary >= vipMinSpend -> VIP
  *      (frequent AND high-spend — both axes, unlike HIGH_VALUE's spend-only)
  *   6. frequency >= regularMinTransactions -> REGULAR (frequent, active,
  *      not necessarily high-spend)
- *   7. otherwise                   -> RETURNING (2+ transactions, recently
+ *   7. otherwise                    -> RETURNING (2+ transactions, recently
  *      active, hasn't reached REGULAR's frequency yet)
  */
 export function classifySegment(
@@ -125,8 +129,8 @@ export function classifySegment(
 ): CustomerSegment {
   const monetary = new Prisma.Decimal(metrics.monetary || '0');
 
-  if (metrics.frequency <= 1) return 'NEW';
   if (monetary.gte(new Prisma.Decimal(thresholds.highValueMinSpend))) return 'HIGH_VALUE';
+  if (metrics.frequency <= 1) return 'NEW';
   if (metrics.recencyDays !== null && metrics.recencyDays >= thresholds.inactiveDays) return 'INACTIVE';
   if (metrics.recencyDays !== null && metrics.recencyDays >= thresholds.atRiskDays) return 'AT_RISK';
   if (

@@ -1090,6 +1090,210 @@ async function main() {
   });
   console.log('  seeded 3 catering inquiries (NEW, QUOTED, CONVERTED-with-scheduled-event-and-deposit)');
 
+  // --- Phase 8: CRM — customer profiles across the funnel -----------------
+  // Three customers, each demonstrating a different point from the
+  // "Phase 8 — CRM" schema.prisma comment block: a repeat guest WITH a
+  // registered User account and real linked order history (design
+  // decision #1's minority case); a guest-only lead with a profile but no
+  // transactions yet; and a retroactive link onto Phase 7's already-seeded
+  // CONVERTED catering funnel, showing customerId is attached explicitly
+  // rather than auto-matched even for pre-existing history (decision #2).
+  const customerUser = await prisma.user.findFirstOrThrow({
+    where: { organizationId: organization.id, email: 'customer@restaurant-platform.local' },
+  });
+  const managerUser = await prisma.user.findFirstOrThrow({
+    where: { organizationId: organization.id, email: 'manager@restaurant-platform.local' },
+  });
+
+  const customerGraceId = `${organization.id}-customer-grace`;
+  const customerGrace = await prisma.customer.upsert({
+    where: { id: customerGraceId },
+    update: {},
+    create: {
+      id: customerGraceId,
+      organizationId: organization.id,
+      userId: customerUser.id,
+      firstName: '[DEMO]',
+      lastName: 'Villanueva',
+      email: customerUser.email,
+      phone: '+63 917 500 1000',
+      status: 'ACTIVE',
+    },
+  });
+
+  // Two completed take-out orders, backdated so recency/frequency are
+  // independently checkable: 60 and 10 days ago.
+  const haloHalo = itemByName.get('Halo-Halo')!;
+  const iceTea = itemByName.get('Iced Tea')!;
+  const graceOrderDefs = [
+    {
+      id: `${organization.id}-order-crm-grace-1`,
+      daysAgo: 60,
+      items: [
+        { item: chickenInasal, quantity: 2, unitPrice: '195.00' },
+        { item: iceTea, quantity: 1, unitPrice: '60.00' },
+      ],
+      // 2x195.00 + 60.00 = 450.00 + 12% tax (54.00) = 504.00
+      subtotal: '450.00',
+      taxTotal: '54.00',
+      total: '504.00',
+    },
+    {
+      id: `${organization.id}-order-crm-grace-2`,
+      daysAgo: 10,
+      items: [
+        { item: chickenInasal, quantity: 1, unitPrice: '195.00' },
+        { item: haloHalo, quantity: 1, unitPrice: '135.00' },
+      ],
+      // 195.00 + 135.00 = 330.00 + 12% tax (39.60) = 369.60
+      subtotal: '330.00',
+      taxTotal: '39.60',
+      total: '369.60',
+    },
+  ];
+  for (const def of graceOrderDefs) {
+    const order = await prisma.order.upsert({
+      where: { id: def.id },
+      update: {},
+      create: {
+        id: def.id,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        type: 'TAKEOUT',
+        status: 'COMPLETED',
+        customerId: customerGrace.id,
+        guestName: '[DEMO] Grace Villanueva',
+        subtotal: def.subtotal,
+        taxTotal: def.taxTotal,
+        total: def.total,
+        createdAt: new Date(now.getTime() - def.daysAgo * 24 * 60 * 60 * 1000),
+      },
+    });
+    const itemsExist = await prisma.orderItem.findFirst({ where: { orderId: order.id } });
+    if (!itemsExist) {
+      for (const line of def.items) {
+        const lineTotal = (Number(line.unitPrice) * line.quantity).toFixed(2);
+        await prisma.orderItem.create({
+          data: {
+            orderId: order.id,
+            menuItemId: line.item.id,
+            nameSnapshot: line.item.name,
+            unitPriceSnapshot: line.unitPrice,
+            quantity: line.quantity,
+            lineSubtotal: lineTotal,
+            lineTotal,
+          },
+        });
+      }
+    }
+  }
+  console.log('  seeded 2 CRM-linked orders for [DEMO] Grace Villanueva (₱504.00, ₱369.60 — RETURNING segment)');
+
+  await prisma.customerAddress.upsert({
+    where: { id: `${organization.id}-customer-grace-address` },
+    update: {},
+    create: {
+      id: `${organization.id}-customer-grace-address`,
+      customerId: customerGrace.id,
+      label: 'Home',
+      line1: '456 Kalayaan Ave',
+      city: 'Makati City',
+      isDefault: true,
+    },
+  });
+  await prisma.customerPreference.upsert({
+    where: { customerId_key: { customerId: customerGrace.id, key: 'dietary' } },
+    update: {},
+    create: { customerId: customerGrace.id, key: 'dietary', value: 'No seafood' },
+  });
+  const graceTagExists = await prisma.customerTag.findFirst({ where: { customerId: customerGrace.id, tag: 'regular' } });
+  if (!graceTagExists) {
+    await prisma.customerTag.create({ data: { customerId: customerGrace.id, tag: 'regular', createdByUserId: managerUser.id } });
+  }
+  const graceNoteExists = await prisma.customerNote.findFirst({ where: { customerId: customerGrace.id } });
+  if (!graceNoteExists) {
+    await prisma.customerNote.create({
+      data: {
+        customerId: customerGrace.id,
+        authorUserId: managerUser.id,
+        note: '[DEMO] Always asks for extra rice on the side — a regular, comp it occasionally.',
+      },
+    });
+  }
+  const graceSecondOrderId = graceOrderDefs[1]!.id;
+  const graceReviewExists = await prisma.customerReview.findFirst({
+    where: { customerId: customerGrace.id, orderId: graceSecondOrderId },
+  });
+  if (!graceReviewExists) {
+    await prisma.customerReview.create({
+      data: {
+        organizationId: organization.id,
+        branchId: branchA.id,
+        customerId: customerGrace.id,
+        orderId: graceSecondOrderId,
+        rating: 5,
+        comment: '[DEMO] Food was hot and fast, as always!',
+        recordedByUserId: managerUser.id,
+      },
+    });
+  }
+  console.log('  seeded 1 address / 1 preference / 1 tag / 1 note / 1 review for [DEMO] Grace Villanueva');
+
+  // Customer 2: a guest-only lead — a profile exists (staff took her
+  // number when she called to ask about the menu) but she has no
+  // transactions yet, so she reads as NEW with zero of everything. Proves
+  // a Customer profile is meaningful on its own, independent of any order/
+  // reservation/catering row — the whole point of decision #1.
+  const customerMarcoId = `${organization.id}-customer-marco`;
+  await prisma.customer.upsert({
+    where: { id: customerMarcoId },
+    update: {},
+    create: {
+      id: customerMarcoId,
+      organizationId: organization.id,
+      firstName: '[DEMO]',
+      lastName: 'dela Peña',
+      phone: '+63 917 500 2000',
+      status: 'ACTIVE',
+    },
+  });
+  console.log('  seeded 1 guest-only (no transactions yet) customer profile for [DEMO] Marco dela Peña (NEW segment)');
+
+  // Customer 3: retroactively linked onto Phase 7's already-seeded
+  // CONVERTED catering funnel (inquiry -> quote -> event) above. A single
+  // ₱100,800.00 catering event is enough to classify as HIGH_VALUE even
+  // though it's her only transaction ever — see lib/crm/rfm.ts's
+  // classifySegment precedence comment for why HIGH_VALUE is checked
+  // before NEW. Plain field assignment, safe to run unconditionally on
+  // every seed run (idempotent by nature, unlike the deliveryFee backfill
+  // in the Phase 6 block above, which needed a guard because it increments
+  // a total instead of just setting a value).
+  const customerPatriciaId = `${organization.id}-customer-patricia`;
+  const customerPatricia = await prisma.customer.upsert({
+    where: { id: customerPatriciaId },
+    update: {},
+    create: {
+      id: customerPatriciaId,
+      organizationId: organization.id,
+      firstName: '[DEMO]',
+      lastName: 'Cruz',
+      email: 'patricia.cruz@example.com',
+      phone: '+63 917 000 3333',
+      status: 'ACTIVE',
+    },
+  });
+  await prisma.cateringInquiry.update({
+    where: { id: inquiryConvertedId },
+    data: { customerId: customerPatricia.id },
+  });
+  await prisma.cateringEvent.update({
+    where: { id: cateringEvent.id },
+    data: { customerId: customerPatricia.id },
+  });
+  console.log(
+    "  linked [DEMO] Patricia Cruz's existing catering funnel to her new customer profile (HIGH_VALUE via a single ₱100,800.00 event)",
+  );
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
