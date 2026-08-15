@@ -47,6 +47,17 @@ model Organization {
   cateringQuotes     CateringQuote[]
   cateringEvents     CateringEvent[]
   cateringPayments   CateringPayment[]
+  customers          Customer[]
+  customerReviews    CustomerReview[]
+
+  // Phase 8 — CRM. Per-organization overrides for the RFM segmentation
+  // thresholds in lib/crm/rfm.ts (recency/frequency/monetary cutoffs).
+  // Nullable: null means "use DEFAULT_RFM_THRESHOLDS", the same
+  // "JSON column, code supplies the default" pattern as Branch.openingHours.
+  // Master spec §32 says "make thresholds configurable" without specifying
+  // a settings UI/table shape — this is the smallest additive way to honor
+  // that per-organization, without a new table for a handful of numbers.
+  crmSettings Json?
 
   @@map("organizations")
 }
@@ -87,6 +98,7 @@ model Branch {
   cateringQuotes    CateringQuote[]
   cateringEvents    CateringEvent[]
   cateringPayments  CateringPayment[]
+  customerReviews   CustomerReview[]
 
   @@index([organizationId])
   @@map("branches")
@@ -133,6 +145,15 @@ model User {
   // customerUserId (Phase 7).
   cateringInquiries CateringInquiry[]
   cateringEvents    CateringEvent[]
+
+  // Phase 8 — CRM. The real customer identity/profile record, if this user
+  // has one — see the "Phase 8 — CRM" comment block near the Customer model
+  // for why this is a separate table from User rather than fields bolted on
+  // here (most customers never register an account at all).
+  customerProfile         Customer?
+  customerNotesAuthored   CustomerNote[]
+  customerTagsCreated     CustomerTag[]
+  customerReviewsRecorded CustomerReview[]
 
   // Email is unique per organization, not globally — the same person may be a
   // customer of multiple independent restaurant organizations on the platform.
@@ -530,6 +551,9 @@ model Reservation {
   guestName  String
   guestEmail String?
   guestPhone String?
+  // Phase 8 — CRM. Optional link to the real Customer/CRM profile — see the
+  // matching comment on Order.customerId.
+  customerId String?
 
   startAt DateTime
   endAt   DateTime
@@ -557,8 +581,10 @@ model Reservation {
   organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
   customer     User?                @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
   tables       ReservationTable[]
   statusHistory ReservationStatusHistory[]
+  reviews       CustomerReview[]
   orders       Order[]
 
   @@index([organizationId])
@@ -721,6 +747,12 @@ model Order {
   guestName      String?
   guestPhone     String?
   guestEmail     String?
+  // Phase 8 — CRM. Optional link to the real Customer/CRM profile, distinct
+  // from customerUserId (a login account) — a guest with no account can
+  // still have a Customer profile staff created/matched at order time. Not
+  // auto-matched from guest contact fields; the caller supplies it
+  // explicitly (see CustomerService and the "Phase 8 — CRM" comment block).
+  customerId String?
 
   // DINE_IN: tableId identifies where the order is being served; a walk-in
   // dine-in order may or may not trace back to a reservationId.
@@ -762,6 +794,7 @@ model Order {
   organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
   customer     User?            @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
   table        RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
   reservation  Reservation?     @relation(fields: [reservationId], references: [id], onDelete: SetNull)
 
@@ -770,10 +803,12 @@ model Order {
   payments      OrderPayment[]
   invoices      Invoice[]
   delivery      DeliveryOrder?
+  reviews       CustomerReview[]
 
   @@index([organizationId])
   @@index([branchId, createdAt])
   @@index([customerUserId])
+  @@index([customerId])
   @@index([tableId])
   @@map("orders")
 }
@@ -1225,6 +1260,9 @@ model CateringInquiry {
   guestName      String?
   guestEmail     String?
   guestPhone     String?
+  // Phase 8 — CRM. Optional link to the real Customer/CRM profile — see the
+  // matching comment on Order.customerId.
+  customerId String?
 
   eventType         String
   eventDate         DateTime
@@ -1246,12 +1284,14 @@ model CateringInquiry {
   organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
   customer     User?            @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
   package      CateringPackage? @relation(fields: [packageId], references: [id], onDelete: SetNull)
   quotes       CateringQuote[]
 
   @@index([organizationId])
   @@index([branchId, status])
   @@index([customerUserId])
+  @@index([customerId])
   @@map("catering_inquiries")
 }
 
@@ -1326,6 +1366,11 @@ model CateringEvent {
   guestName      String?
   guestEmail     String?
   guestPhone     String?
+  // Phase 8 — CRM. Copied from CateringQuote.inquiry.customerId at
+  // ACCEPTED-transition time — see CateringService.updateQuoteStatus. Not
+  // directly settable by API input, same "snapshot, not live join" reasoning
+  // as the other CateringEvent fields copied from the inquiry.
+  customerId String?
 
   eventType  String
   eventDate  DateTime
@@ -1349,12 +1394,15 @@ model CateringEvent {
   branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
   quote        CateringQuote       @relation(fields: [quoteId], references: [id], onDelete: Restrict)
   customer     User?               @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
   items        CateringEventItem[]
   payments     CateringPayment[]
+  reviews      CustomerReview[]
 
   @@index([organizationId])
   @@index([branchId, status])
   @@index([customerUserId])
+  @@index([customerId])
   @@map("catering_events")
 }
 
@@ -1392,4 +1440,214 @@ model CateringPayment {
   @@index([organizationId])
   @@index([eventId])
   @@map("catering_payments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 — CRM
+// ---------------------------------------------------------------------------
+//
+// Master spec §9 names the table list (`customers`, `customer_addresses`,
+// `customer_preferences`, `customer_notes`, `customer_tags`); §31 lists what
+// to track (orders/reservations/catering counts, spend, average order value,
+// first/last transaction, favorite products, visit frequency, lifetime
+// value); §32 asks for RFM (Recency/Frequency/Monetary) segmentation into
+// NEW/RETURNING/REGULAR/VIP/AT_RISK/INACTIVE/HIGH_VALUE with "configurable"
+// thresholds. Phase 8's own build list additionally names "Reviews" with no
+// field-level spec anywhere in the document — `CustomerReview` below is this
+// build's own design, documented as such rather than presented as spec'd.
+// Five design decisions worth recording:
+//
+// 1. `Customer` is a real profile table, deliberately separate from `User`
+//    — the same "role/account grants capability, profile carries domain
+//    data" split Phase 6 used for `Driver` vs. the DRIVER role. Most
+//    restaurant customers are walk-ins or phone/guest orders who never
+//    create a login account at all, so a CRM profile has to be able to
+//    exist independently of one; `Customer.userId` (nullable, `@unique`) is
+//    the optional link for the minority who do register. Per §9's literal
+//    field list, `Customer` carries only `organizationId` — no `branchId` —
+//    since a customer's relationship is with the restaurant business, not
+//    one physical location; a customer who orders from Branch A and dines
+//    at Branch B is still one customer.
+// 2. To make "total orders / total spend / favorite products / last
+//    transaction" genuinely queryable rather than fragile email-string
+//    matching across guest checkouts, this phase adds a nullable
+//    `customerId` column (`onDelete: SetNull`) to `Order`, `Reservation`,
+//    and `CateringInquiry` — the relation field is named `crmCustomer` to
+//    keep it visually distinct from each model's existing `customer` field
+//    (the `User?` relation via `customerUserId`, an unrelated concept: "was
+//    there a login account"). `CateringEvent.customerId` is the same idea
+//    but is never set directly by API input — `CateringService` copies it
+//    from `CateringQuote.inquiry.customerId` at the `ACCEPTED` transition,
+//    the same "snapshot at accept-time" treatment already given to
+//    `CateringEvent`'s guest-contact fields. None of this is auto-matched
+//    from guest name/email/phone — staff explicitly attach a `Customer` via
+//    the CRM UI (search-or-create), which is a deliberate scope boundary:
+//    fuzzy customer-matching/de-duplication is a real feature with real
+//    false-positive risk (merging two different people who share a phone
+//    number), not built here.
+// 3. `CustomerReview.rating` is enforced as an integer 1-5 by a hand-written
+//    `CHECK` constraint in the migration (Prisma's schema DSL has no CHECK
+//    support, the same gap Phase 3's `EXCLUDE` constraint and Phase 4's
+//    partial unique index hit) in addition to the Zod-layer bound — the
+//    database is the real guarantee, Zod is the friendly error message.
+//    Every review in this build is `recordedByUserId`-attributed staff
+//    entry, not a customer-submitted rating — there is no customer-facing
+//    review form (see point 5).
+// 4. RFM segmentation is computed on read, in `lib/crm/rfm.ts`
+//    (`classifySegment`), never stored as a column on `Customer`. This
+//    build has no background job scheduler (the same honest gap Phase 5's
+//    kitchen board polls around, and Phase 14/Notifications hasn't been
+//    built yet) — a stored `segment` column would silently go stale with
+//    nothing to ever recompute it. Computing it live from `Order`/
+//    `Reservation`/`CateringEvent` aggregates on every profile/list read is
+//    the correct trade-off at this build's current scale, not a shortcut.
+//    `Customer.status` (ACTIVE/INACTIVE/BLOCKED) is a different, orthogonal
+//    concept — a staff-set administrative flag (e.g. "this guest is
+//    banned"), not the computed analytics segment.
+// 5. §32's "make thresholds configurable" is honored via
+//    `Organization.crmSettings` (nullable `Json`), following the same
+//    "JSON column, code supplies the default when null" pattern
+//    `Branch.openingHours` already established in Phase 1 — not a new
+//    dedicated settings table for a handful of numbers. `lib/crm/rfm.ts`
+//    exports `DEFAULT_RFM_THRESHOLDS` and `resolveRfmThresholds(org)`,
+//    which merges any `crmSettings.rfmThresholds` override over the
+//    defaults, field by field.
+// ---------------------------------------------------------------------------
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+model Customer {
+  id             String         @id @default(cuid())
+  organizationId String
+  // Optional: set only when this customer also has a registered User
+  // account. Independent of everything else here — see module header #1.
+  userId         String?        @unique
+  firstName      String
+  lastName       String?
+  email          String?
+  phone          String?
+  dateOfBirth    DateTime?
+  status         CustomerStatus @default(ACTIVE)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
+  addresses    CustomerAddress[]
+  preferences  CustomerPreference[]
+  notes        CustomerNote[]
+  tags         CustomerTag[]
+  reviews      CustomerReview[]
+  orders       Order[]
+  reservations Reservation[]
+  cateringInquiries CateringInquiry[]
+  cateringEvents    CateringEvent[]
+
+  @@index([organizationId])
+  @@index([organizationId, email])
+  @@index([organizationId, phone])
+  @@map("customers")
+}
+
+model CustomerAddress {
+  id         String   @id @default(cuid())
+  customerId String
+  // e.g. "Home", "Office" — free text, not an enum; addresses are for
+  // delivery convenience, not a workflow with legal statuses.
+  label      String?
+  line1      String
+  line2      String?
+  city       String?
+  province   String?
+  postalCode String?
+  country    String   @default("PH")
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("customer_addresses")
+}
+
+model CustomerPreference {
+  id         String   @id @default(cuid())
+  customerId String
+  // Free-form key/value (e.g. key "dietary", value "vegetarian"; key
+  // "seating", value "booth by the window") rather than a fixed set of
+  // typed columns — the master spec names the table with no field list, and
+  // a restaurant's meaningful preferences vary too much to hard-code.
+  key        String
+  value      String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, key])
+  @@map("customer_preferences")
+}
+
+model CustomerNote {
+  id           String   @id @default(cuid())
+  customerId   String
+  authorUserId String?
+  note         String
+  createdAt    DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  author   User?    @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+  @@map("customer_notes")
+}
+
+model CustomerTag {
+  id              String   @id @default(cuid())
+  customerId      String
+  tag             String
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([customerId, tag])
+  @@map("customer_tags")
+}
+
+model CustomerReview {
+  id               String   @id @default(cuid())
+  organizationId   String
+  branchId         String?
+  customerId       String?
+  orderId          String?
+  reservationId    String?
+  cateringEventId  String?
+  // Bounded 1-5 by a hand-written CHECK constraint in the migration — see
+  // module header #3.
+  rating           Int
+  comment          String?
+  recordedByUserId String?
+  createdAt        DateTime @default(now())
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  customer      Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  order         Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  reservation   Reservation?   @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  cateringEvent CateringEvent? @relation(fields: [cateringEventId], references: [id], onDelete: SetNull)
+  recordedBy    User?          @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([orderId])
+  @@index([reservationId])
+  @@index([cateringEventId])
+  @@map("customer_reviews")
 }
