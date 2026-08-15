@@ -109,8 +109,8 @@ branch.
 3. Reservations: availability engine, deposits, confirmation, cancellation, no-show, concurrency tests — **done**
 4. Orders: dine-in, take-out, delivery, payments, invoices — **done**
 5. Kitchen display system — **done**
-6. Delivery: zones, drivers, assignment, tracking — **done, this pass**
-7. Catering: inquiry → quote → accept → deposit → event → final payment
+6. Delivery: zones, drivers, assignment, tracking — **done**
+7. Catering: inquiry → quote → accept → deposit → event → final payment — **done, this pass**
 8. CRM: profiles, history, RFM segmentation, lifetime value
 9. Inventory: ingredients, recipes, purchasing, stock, waste, COGS integration
 10. Accounting: chart of accounts, journal entries, double-entry ledger, deposits, reversals
@@ -405,3 +405,71 @@ Scope boundary: this phase is dispatch and driver-facing status/tracking only. I
 customer-facing delivery tracking (a customer-visible "where's my order" view is a reasonable
 future feature building on the same `DeliveryOrder` data, not built here) or any SMS/push
 "your driver is on the way" notification (Phase 14).
+
+## 15. Phase 7 — Catering
+
+Master spec §21 asks for a catering funnel (inquiry, package, quote, customer approval, deposit,
+event management, balance payment) and §22 gives an explicit quotation formula — Food + Staffing
++ Equipment + Transportation + Setup + Service Fees − Discounts + Taxes = TOTAL — plus a literal
+instruction: "When accepted, create the appropriate catering event." §44 names `CateringService`
+directly as an example service, so this phase reuses that name rather than inventing a different
+one.
+
+The funnel maps onto four tables with a clear one-directional flow: `CateringInquiry` (raw
+request, `NEW`/`QUOTED`/`CONVERTED`/`CANCELLED`) → `CateringQuote` (priced proposal, a full
+`DRAFT`/`SENT`/`VIEWED`/`ACCEPTED`/`REJECTED`/`EXPIRED`/`CANCELLED` state machine) → `CateringEvent`
+(the operational booking once accepted, `SCHEDULED`/`IN_PROGRESS`/`COMPLETED`/`CANCELLED`) →
+`CateringPayment` (deposit/balance ledger against the event). A `CateringQuote` never has more
+than one `CateringEvent` — enforced with a `@unique quoteId` foreign key, not just application
+logic — because "accept a quote" is a one-time transition, not something that should silently
+produce duplicate events on a retried request.
+
+**Only the food line gets real itemization.** `CateringQuoteItem`/`CateringEventItem` exist so a
+quote can show "30 × Silver Package (per guest) @ 500.00", but staffing, equipment,
+transportation, setup, and the service fee are flat `Decimal` columns on `CateringQuote` itself,
+computed server-side into the total rather than broken into their own itemized child rows. This
+is a deliberate scope call, not laziness: itemizing "staffing" would require a staffing rate card
+(hourly rates per role) and itemizing "equipment" would require an equipment rental catalog with
+its own pricing — neither exists yet, and inventing placeholder itemization for categories the
+platform can't actually price from real data would be worse than a flat, staff-entered number.
+This also matches how catering quotes work in practice: food is priced per-guest per-item, while
+staffing/equipment/logistics are typically quoted as flat line totals even by vendors who do have
+internal rate cards.
+
+**The `ACCEPTED` transition is where the funnel's one real side effect lives.** Following §22's
+literal instruction, `CateringService.updateQuoteStatus` special-cases the `ACCEPTED` status
+inside its transaction: it creates the `CateringEvent` (copying guest/event details from the
+parent `CateringInquiry` and the quote's totals), copies every `CateringQuoteItem` into a
+matching `CateringEventItem`, and bumps the parent inquiry to `CONVERTED` — all three writes
+succeed or fail together, the same "one business event, one transaction" discipline Phase 6 used
+for `Order`→`DeliveryOrder` auto-creation. Every other status transition (`SENT`, `VIEWED`,
+`REJECTED`, `EXPIRED`, `CANCELLED`) is a plain whitelisted state-machine move with no side
+effects beyond an audit log entry, mirroring every other status machine in this codebase
+(`TableStatus`, `ReservationStatus`, `OrderStatus`, `DeliveryStatus`).
+
+**Payments are a real table, unlike Phase 3's reservation deposits.** A `Reservation` only ever
+needs one deposit, so Phase 3 put deposit fields directly on the `Reservation` row. A catering
+event routinely needs at least two payments over time — a deposit at booking, a balance before or
+at the event — so `CateringPayment` is a proper child table instead, the same shape as Phase 4's
+`OrderPayment`. It deliberately reuses `OrderPaymentMethod`/`OrderPaymentStatus` rather than
+declaring catering-specific duplicates of the same CASH/CARD/GCASH/MAYA/BANK_TRANSFER/OTHER and
+PENDING/COMPLETED/FAILED/REFUNDED enums; the only genuinely new enum is `CateringPaymentType`
+(`DEPOSIT`/`BALANCE`), because that distinction doesn't exist for orders.
+`CateringService.paymentSummary` computes `paidAmount`/`balanceDue`/`isFullyPaid` from the ledger
+exactly like `OrderService.paymentSummary` does — one shared pattern, two independent ledgers.
+
+Permissions: no new key. `catering:manage` was already declared in Phase 1's forward-looking
+catalog and already granted to MANAGER/OWNER/ADMINISTRATOR — but deliberately **not** STAFF,
+unlike `order:manage`/`delivery:manage`. Taking and quoting a catering booking is treated as a
+manager-level function in this platform (negotiating pricing, discounts, and event commitments),
+not a front-line task any staff member should be able to do unsupervised; a restaurant that wants
+to delegate it can grant the permission to a custom role without a code change, since RBAC is
+DB-sourced.
+
+Scope boundary, stated plainly: no e-signature capture, no PDF quote generation/emailing, and no
+customer-facing self-service portal exist yet. Every quote-status transition in this build is a
+staff member clicking a button on behalf of the customer ("customer called and accepted") — there
+is no `/customer` route where a customer logs in and clicks "Accept" themselves. Building that
+would require customer-facing catering authentication and a public quote-viewing page, neither of
+which exists; noted here explicitly rather than silently faked, the same discipline every prior
+phase has applied to its own unbuilt integrations.

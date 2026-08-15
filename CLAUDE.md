@@ -408,9 +408,71 @@ response. Financial and inventory calculations are never trusted from the client
   PICKED_UP); and `myDeliveries` returning only the calling driver's own deliveries, including
   across organizations.
 
-**Not yet built** (Phases 7–16 per `docs/architecture.md`): catering, CRM/RFM, inventory,
-accounting ledger, financial reporting, owner analytics, AI insights, notifications, hardening,
-deployment.
+**Phase 7 — Catering: done.**
+- Prisma schema additions: `CateringPackage`, `CateringInquiry`, `CateringQuote` (+
+  `CateringQuoteItem`), `CateringEvent` (+ `CateringEventItem`), `CateringPayment`, plus
+  `CateringInquiryStatus`, `CateringQuoteStatus`, `CateringEventStatus`, `CateringPaymentType`
+  enums. See the "Phase 7 — Catering" comment block in `schema.prisma` for the five numbered
+  design decisions in full; the short version: only the food portion of a quote gets real
+  itemized `CateringQuoteItem` rows (staffing/equipment/transportation/setup/service-fee stay
+  flat server-computed `Decimal` columns — there's no staffing-rate-card or equipment-rental
+  system yet to itemize against, and this matches real catering-industry quoting practice);
+  `CateringEvent` is a 1:1 companion to `CateringQuote` (`@unique quoteId`), auto-created inside
+  the quote's `ACCEPTED` transition per master spec §22's literal "When accepted, create the
+  appropriate catering event" instruction — the same pattern as Phase 6's `Order`→`DeliveryOrder`
+  split; `CateringPayment` is a real table (unlike Phase 3's single-deposit-field `Reservation`)
+  because the catering funnel needs multiple payments over time (deposit, then balance), reusing
+  `OrderPaymentMethod`/`OrderPaymentStatus` rather than duplicating those enums.
+- `CateringService` (per master spec §44's literal naming) implements the funnel from §21/§22:
+  Inquiry → Quote → Accept → Deposit → Event → Final payment. `updateQuoteStatus` enforces a
+  whitelisted `CateringQuoteStatus` state machine (`DRAFT→SENT→VIEWED→ACCEPTED`, with
+  `REJECTED`/`EXPIRED`/`CANCELLED` branches requiring a reason) and special-cases `ACCEPTED`
+  inside its transaction to create the `CateringEvent` (+ copy quote items into
+  `CateringEventItem`) and bump the parent `CateringInquiry` to `CONVERTED`. `computeQuoteTotals`
+  implements the master spec's exact formula: Food + Staffing + Equipment + Transportation +
+  Setup + Service Fees − Discounts + Taxes = TOTAL (a local `PROVISIONAL_VAT_RATE`, same
+  PH-tax-needs-accountant-sign-off caveat as every other tax-touching service in this codebase).
+  `recordPayment`/`paymentSummary` on events mirror `OrderService`'s payment-ledger pattern
+  exactly (`paidAmount`, `balanceDue`, `isFullyPaid` computed from COMPLETED/REFUNDED rows, never
+  a stored running total).
+- Permissions: no new permission key needed — `catering:manage` already existed in Phase 1's
+  forward-looking catalog, already granted to MANAGER/OWNER/ADMINISTRATOR only (a deliberate
+  difference from `order:manage`/`delivery:manage`, which STAFF also holds — catering quoting and
+  event management is treated as a manager-level function, not a front-line one).
+- API routes under `/api/branches/[id]/catering/packages` (+ `/[packageId]`),
+  `/catering/inquiries` (+ `/[inquiryId]`, `/[inquiryId]/cancel`), `/catering/quotes` (+
+  `/[quoteId]`, `/[quoteId]/status`), and `/catering/events` (+ `/[eventId]`,
+  `/[eventId]/status`, `/[eventId]/payments`).
+- Dashboard UI: a Catering board (`/dashboard/catering` — branch selector, package management,
+  a new-inquiry form, an inquiries list with an inline quote builder — guest count, six flat fee
+  inputs, a dynamic food-items list — a quotes list with status-driven action buttons and a full
+  fee-breakdown display, and an events list with status actions and a payment-recording form
+  showing live paid/balance totals) replacing the Phase 1 placeholder. Overview page gained a
+  live "Upcoming Catering Events" card.
+- Scope boundary, stated plainly: no real e-signature or PDF quote generation, and no
+  customer-facing self-service portal — quote status transitions (Send/Mark viewed/Accept/
+  Reject/Cancel) are staff-recorded on behalf of the customer, not driven by an actual
+  customer-facing UI. Consistent with every prior phase's "no fake integrations" rule: this is
+  named as a gap in the code and here, not silently faked.
+- Seed data extended: 2 catering packages (Silver/Gold), and 3 inquiries spanning the funnel —
+  one `NEW` with no quote, one `QUOTED` with a `SENT` quote (30 guests × Silver, hand-computed
+  total `21840.00`), and one `CONVERTED` with an `ACCEPTED` quote, a `SCHEDULED` event, and a
+  completed deposit payment (100 guests × Gold, hand-computed total `100800.00`).
+- Unit tests: every `lib/validation/catering.ts` schema (package/inquiry/quote create+update,
+  quote/event status enums, payment defaults, list-query schemas). Integration tests: package
+  CRUD + duplicate-name/tenant isolation; inquiry creation, cancellation, and the
+  edit-blocked-once-QUOTED rule; quote total computation with an **exact Decimal assertion**
+  against the same worked example as the seed data (`foodTotal 15000.00`, `taxTotal 2340.00`,
+  `total 21840.00`); rejecting a quote for a CONVERTED/CANCELLED inquiry; editing a DRAFT quote
+  recomputing totals and rejecting edits once not DRAFT; the full `DRAFT→SENT→VIEWED→ACCEPTED`
+  walk asserting the event auto-creation and inquiry `CONVERTED` bump; illegal-transition and
+  missing-reason rejection; event status lifecycle (`SCHEDULED→IN_PROGRESS→COMPLETED`), illegal
+  transitions, missing-cancellation-reason; deposit + balance payment recording with an exact
+  `paymentSummary` assertion (`560.00` total, `200.00` deposit, `360.00` balance, `isFullyPaid`
+  true after both); tenant isolation across packages, inquiries, quotes, events, and payments.
+
+**Not yet built** (Phases 8–16 per `docs/architecture.md`): CRM/RFM, inventory, accounting
+ledger, financial reporting, owner analytics, AI insights, notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -577,6 +639,23 @@ deployment.
   categories. No `TS2322` key-prop diagnostic appeared this phase — both new list renders
   (`delivery-board.tsx`, `my-deliveries.tsx`) render their `.map()` rows inline rather than
   extracting a separately-typed child component, avoiding the Phase 5 pitfall from the start.
+  Phase 7's migration (`prisma/migrations/20260815040000_phase7_catering/migration.sql`) adds
+  four enums and seven new tables; hand-written and applied clean to both the dev and test local
+  Postgres databases (after another mid-session `pg_ctlcluster` restart — confirmed 0
+  organizations afterward, expected since no real seed run happens in this sandbox). A
+  7-assertion smoke test verified: a quote total round-trips exactly (`67200.00`); a duplicate
+  `CateringEvent.quoteId` is rejected by the unique constraint; a deposit + balance payment sum
+  to the event total exactly; deleting a quote with an existing event is blocked (`ON DELETE
+  RESTRICT`); deleting an event cascades to its items/payments; deleting a quote with no event
+  cascades to its items; and an undocumented `CateringQuoteStatus` value is rejected by the enum
+  type. All passed. The `git stash -u` before/after TypeScript diff (checked out to the
+  pre-Phase-7 commit, re-ran `tsc --noEmit`, checked back out to the tip) confirmed the same
+  result as Phases 5-6: baseline was 1,298 diagnostics, after Phase 7 was 1,539 — 241 more,
+  entirely inside already-established categories (`TS7026` +148, `TS7006` +74, `TS2307` +18,
+  `TS2882` +1 — one new `server-only` import in `CateringService.ts`, the identical pattern every
+  other service file hits). Zero new diagnostic categories. No `TS2322` key-prop diagnostic
+  appeared — `catering-board.tsx`'s list renders (packages, inquiries, quotes, events) all render
+  their `.map()` rows inline, same discipline as Phase 6.
 
 ## Required Environment Variables
 

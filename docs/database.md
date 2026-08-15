@@ -302,13 +302,77 @@ just a status change or a value overwrite. `DeliveryService.assignDriver` closes
 most one row per `DeliveryOrder` is ever open at a time — verified by the migration smoke test and
 an integration test asserting exactly one open assignment after a reassignment.
 
+## Phase 7 Schema
+
+### CateringPackage
+`id, organizationId, branchId, name, description?, pricePerGuest (Decimal), minGuests?,
+maxGuests?, active (default true)`. `@@unique([branchId, name])` — same per-branch-unique-name
+pattern as `TableSection`/`DeliveryZone`. Optional — an inquiry/quote can reference a package for
+per-guest food pricing, or skip it and rely entirely on the quote's flat fee fields.
+
+### CateringInquiry
+`id, organizationId, branchId, customerUserId? (FK to User, ON DELETE SET NULL), guestName?,
+guestEmail?, guestPhone?, eventType, eventDate, location, guestCount, packageId? (FK to
+CateringPackage, ON DELETE SET NULL), menuRequirements?, equipmentRequests?, staffRequests?,
+setupRequests?, deliveryRequested (default false), deliveryAddress?, specialRequests?, status
+(CateringInquiryStatus, default NEW)`. Same optional-`customerUserId`-plus-guest-snapshot pattern
+as `Order`/`Reservation` — a catering lead may or may not come from a registered customer.
+`CateringInquiryStatus` enum: `NEW, QUOTED, CONVERTED, CANCELLED`.
+
+### CateringQuote
+`id, organizationId, branchId, inquiryId (FK to CateringInquiry, ON DELETE CASCADE), packageId?
+(ON DELETE SET NULL), guestCount, foodTotal/staffingTotal/equipmentTotal/transportationTotal/
+setupTotal/serviceFeeTotal/discountTotal/taxTotal/total (all Decimal, default 0), status
+(CateringQuoteStatus, default DRAFT), sentAt?, viewedAt?, respondedAt?, expiresAt?,
+rejectionReason?, cancellationReason?`. `foodTotal`/`taxTotal`/`total` are always server-computed
+by `CateringService.computeQuoteTotals` from the item list, fee inputs, and the tax rate — never
+accepted directly from the client (see `lib/validation/catering.ts`, which deliberately omits
+those three fields from `createCateringQuoteSchema`). `CateringQuoteStatus` enum: `DRAFT, SENT,
+VIEWED, ACCEPTED, REJECTED, EXPIRED, CANCELLED` — whitelisted transitions in
+`CateringService.QUOTE_ALLOWED_TRANSITIONS`, `rejectionReason`/`cancellationReason` required by
+the service (not the DB) before `REJECTED`/`CANCELLED`.
+
+### CateringQuoteItem
+`id, quoteId (FK to CateringQuote, ON DELETE CASCADE), description, quantity (default 1),
+unitPrice (Decimal), lineTotal (Decimal)`. The only itemized line category on a quote — see
+`docs/architecture.md` § 15 for why staffing/equipment/transportation/setup/service-fee stay flat
+columns instead of their own itemized tables.
+
+### CateringEvent
+`id, organizationId, branchId, quoteId (@unique, FK to CateringQuote, ON DELETE RESTRICT),
+customerUserId? (ON DELETE SET NULL), guestName?/guestEmail?/guestPhone?, eventType, eventDate,
+location, guestCount, status (CateringEventStatus, default SCHEDULED), total (Decimal),
+depositAmount (Decimal, default 0), notes?, cancellationReason?`. The `@unique quoteId` is the
+DB-enforced guarantee that a quote can never be accepted into two events — the same "constraint,
+not just application logic" discipline as Phase 3's double-booking `EXCLUDE` constraint and Phase
+4's one-active-invoice partial index. The quote FK is `RESTRICT` (an event's originating quote can
+never be deleted out from under it — quotes with a live event are permanent history, same
+reasoning as `DeliveryZone`'s `RESTRICT` FK). Auto-created by
+`CateringService.updateQuoteStatus`'s `ACCEPTED` transition, never directly by an API caller.
+`CateringEventStatus` enum: `SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED` — whitelisted
+transitions in `CateringService.EVENT_ALLOWED_TRANSITIONS`, `cancellationReason` required before
+`CANCELLED`.
+
+### CateringEventItem
+`id, eventId (FK to CateringEvent, ON DELETE CASCADE), description, quantity, unitPrice,
+lineTotal`. A snapshot copy of the accepted quote's `CateringQuoteItem` rows at accept-time —
+later edits to the (now-terminal) quote can't happen anyway once it's not `DRAFT`, but this keeps
+the event's own item list independently readable without joining back through the quote.
+
+### CateringPayment
+`id, organizationId, branchId, eventId (FK to CateringEvent, ON DELETE CASCADE), type
+(CateringPaymentType), method (OrderPaymentMethod, reused), amount (Decimal), status
+(OrderPaymentStatus, reused, default COMPLETED), note?, recordedByUserId?`. A real child table
+(unlike `Reservation`'s single deposit field) because a catering event routinely takes more than
+one payment — see `docs/architecture.md` § 15. `CateringPaymentType` enum: `DEPOSIT, BALANCE` —
+the only genuinely new payment enum this phase adds; method/status are reused directly from
+Phase 4's `OrderPaymentMethod`/`OrderPaymentStatus` rather than duplicated.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 7: `catering_inquiries`, `catering_packages`, `catering_quotes`, `catering_quote_items`,
-  `catering_events`, `catering_event_items`, `catering_payments`
 - Phase 8: `customers`, `customer_addresses`, `customer_preferences`, `customer_notes`,
   `customer_tags`
 - Phase 9: `ingredients`, `units`, `recipes`, `recipe_items`, `inventory_items`,
