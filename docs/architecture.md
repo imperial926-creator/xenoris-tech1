@@ -473,3 +473,85 @@ is no `/customer` route where a customer logs in and clicks "Accept" themselves.
 would require customer-facing catering authentication and a public quote-viewing page, neither of
 which exists; noted here explicitly rather than silently faked, the same discipline every prior
 phase has applied to its own unbuilt integrations.
+
+## 16. Phase 8 — CRM
+
+Master spec §9 lists a `customers` table with a specific, narrow field set (name, email, phone,
+date of birth, status — "do not collect unnecessary personal information"); §31 asks for a CRM
+that tracks total orders/reservations/catering orders, total spending, average order value,
+first/last transaction, favorite products, visit frequency, and lifetime value; §32 asks for RFM
+(Recency/Frequency/Monetary) segmentation into NEW/RETURNING/REGULAR/VIP/AT_RISK/INACTIVE/
+HIGH_VALUE, with "make thresholds configurable" stated explicitly. The Phase 8 build list itself
+just says "Reviews" with no field-level spec anywhere else in the document — `CustomerReview` is
+this phase's own design, called out as such rather than presented as a literal spec requirement.
+
+**`Customer` is a new profile table, deliberately not `User`.** The master spec's `customers`
+table (§9) is organization-scoped domain data — order history, preferences, segment — not an
+authentication concept. This platform already has `User` for login/RBAC. Rather than bolt CRM
+fields onto `User` (which would force every walk-in or phone-order customer to have a login
+account just to be trackable), `Customer` is its own table with a nullable, `@unique` `userId`
+link for the minority who do register. This is the identical shape Phase 6 used for `Driver` vs.
+the `DRIVER` role: the role/account grants *capability* (can this person log in, what can they
+do), the profile carries *domain data* (what has this person actually done). Most `Customer` rows
+in this build's seed data have no `userId` at all, on purpose — that's the common case, not an
+edge case.
+
+**Linking is explicit, never inferred.** `Order`, `Reservation`, and `CateringInquiry` each gained
+a nullable, client-settable `customerId` foreign key (`onDelete: SetNull`, so deleting a
+`Customer` profile never deletes the transaction history that references it — see the field
+comment in `schema.prisma`'s Phase 8 block). Deliberately **not built**: any automatic matching of
+a guest's name/email/phone against existing `Customer` records. Fuzzy contact-matching has real
+failure modes — two different "J. Santos" phone orders silently merging into one customer's
+history is worse than two separate, correctly-unlinked guest transactions — and this build has no
+deduplication/merge tooling to clean up a bad auto-match after the fact. Staff attach a `Customer`
+explicitly, through the CRM UI or by passing `customerId` when creating the order/reservation/
+inquiry. The one deliberate exception is `CateringEvent.customerId`, which is **not**
+client-settable at all — it's copied automatically from `CateringQuote.inquiry.customerId` inside
+`CateringService.updateQuoteStatus`'s `ACCEPTED` transition, the same "the event inherits from
+its inquiry" logic that already copies guest contact details there. Every one of these relation
+fields is named `crmCustomer`, not `customer`, specifically so it reads as visually distinct from
+each model's pre-existing `customer`/`customerUserId` relation (the optional login-account link —
+"did this order have a logged-in customer," an unrelated question from "is this order linked to a
+CRM profile").
+
+**RFM segmentation is computed live, never stored.** `lib/crm/rfm.ts` exports a pure function,
+`classifySegment(metrics, thresholds)`, that takes recency/frequency/monetary numbers and returns
+one of the seven master-spec segments — zero database access, fully unit-testable in isolation.
+`CustomerService.getAnalytics` is the only caller: it gathers the raw metrics from real
+`Order`/`Reservation`/`CateringEvent` rows on every request and classifies fresh, rather than
+reading (and potentially serving stale) a stored `segment` column. This mirrors the reasoning
+behind Phase 5's Kitchen Display polling instead of push updates: this build has no background
+job scheduler, so anything that should stay "live" has to either be computed on read or accept
+becoming wrong over time with no process to fix it. A stored segment is the second option wearing
+a disguise. The trade-off is honestly a real one — `segmentBreakdown` (org-wide counts for the
+dashboard) ends up running `getAnalytics` once per customer, an N+1 query pattern that is fine at
+this build's demo/early-stage data volumes and openly documented as a scaling limit a real
+production deployment would need to address with a batched or materialized version instead.
+
+**Segment precedence is a fixed decision chain, not a scored/weighted model**, and the order
+matters more than it might look: `HIGH_VALUE` (spend alone) is checked *before* `NEW` (≤1
+transaction), specifically so that a customer's very first purchase — if it's large enough, like
+a single big catering event — reads as `HIGH_VALUE` rather than being masked by "this is their
+first order." Getting this ordering wrong is exactly the kind of bug that's easy to ship
+silently, because both branches return a real, plausible-looking segment; see `CLAUDE.md`'s
+Phase 8 status entry for how this was actually caught (cross-checking the algorithm against a
+worked seed-data example) and the regression test that now guards it.
+
+**Thresholds are configurable per §32's literal instruction**, via a nullable
+`Organization.crmSettings` JSON column — the same "JSON column, code supplies the default when
+null" pattern `Branch.openingHours` established in Phase 1, rather than a dedicated settings
+table for what is currently a single nested object. `resolveRfmThresholds` merges
+`crmSettings.rfmThresholds` over `DEFAULT_RFM_THRESHOLDS` field by field, with defensive
+validation per field (a malformed or out-of-range override for one threshold falls back to that
+field's own default rather than invalidating the whole threshold set, or throwing).
+
+Permissions: `customer:view` already existed in Phase 1's forward-looking catalog; `customer:manage`
+is new this phase, granted to STAFF (alongside VIEW — recording a walk-in's name/phone while
+taking a phone order is routine front-of-house work, not a manager-level function, unlike
+`catering:manage` which stayed manager-only in Phase 7) and MANAGER.
+
+Scope boundary, stated plainly: `CustomerReview` is entirely staff-recorded — there is no
+customer-facing review submission form, no rating-invitation email, and no moderation queue.
+Every review in this build is a staff member entering a rating/comment on a customer's behalf
+("customer mentioned they loved the food"), the same "staff acts on the customer's behalf" pattern
+already established for catering quote transitions in Phase 7.

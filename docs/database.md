@@ -368,13 +368,79 @@ one payment — see `docs/architecture.md` § 15. `CateringPaymentType` enum: `D
 the only genuinely new payment enum this phase adds; method/status are reused directly from
 Phase 4's `OrderPaymentMethod`/`OrderPaymentStatus` rather than duplicated.
 
+## Phase 8 Schema
+
+### Customer
+`id, organizationId, userId? (@unique, FK to User, ON DELETE SET NULL), firstName, lastName?,
+email?, phone?, dateOfBirth?, status (CustomerStatus, default ACTIVE)`. Organization-scoped, not
+branch-scoped, matching §9's literal field list. `userId` is nullable and unique — most customers
+(walk-ins, guest orders) never link to a `User` login account; the minority who do register get a
+1:1 link. `CustomerStatus` enum: `ACTIVE, INACTIVE, BLOCKED` — a staff-set administrative flag,
+orthogonal to the RFM segment computed live in `lib/crm/rfm.ts` (see `docs/architecture.md` § 16).
+Indexed on `organizationId`, `[organizationId, email]`, and `[organizationId, phone]` for lookup.
+
+### CustomerAddress
+`id, customerId (FK to Customer, ON DELETE CASCADE), label?, line1, line2?, city?, province?,
+postalCode?, country (default "PH"), isDefault (default false)`. Multiple addresses per customer;
+`CustomerService.addAddress`/`updateAddress` enforce single-default exclusivity in application
+code (clearing any other `isDefault` row via `updateMany` inside the same transaction) rather than
+a DB constraint, since "at most one default" across a nullable boolean isn't expressible as a
+simple unique index the way Phase 4's partial-unique-index pattern handled "one active invoice."
+
+### CustomerPreference
+`id, customerId (FK to Customer, ON DELETE CASCADE), key, value`. Free-form key/value pairs
+("dietary: No seafood", "seating: Window preferred") rather than a fixed column set, since the
+master spec doesn't enumerate what preferences to track. `@@unique([customerId, key])` — set via
+upsert, so re-setting the same key updates rather than duplicates.
+
+### CustomerNote
+`id, customerId (FK to Customer, ON DELETE CASCADE), authorUserId? (FK to User, ON DELETE SET
+NULL), note, createdAt`. Append-only staff notes — no update/edit path, matching how notes work in
+every other system that treats them as a timestamped log rather than a mutable field.
+
+### CustomerTag
+`id, customerId (FK to Customer, ON DELETE CASCADE), tag, createdByUserId? (FK to User, ON DELETE
+SET NULL)`. `@@unique([customerId, tag])` — duplicate tags rejected by `CustomerService.addTag`
+before the DB constraint would even be hit, so the caller gets a clear `ConflictError` rather than
+a raw Prisma unique-violation.
+
+### CustomerReview
+`id, organizationId, branchId? (FK to Branch, ON DELETE SET NULL), customerId? (FK to Customer, ON
+DELETE SET NULL), orderId? / reservationId? / cateringEventId? (all ON DELETE SET NULL), rating
+(Int, 1-5), comment?, recordedByUserId? (FK to User, ON DELETE SET NULL)`. Every link is optional
+and independently nullable — a review can stand alone (a walk-in comment card with no linked
+record) or attach to any combination of customer/order/reservation/event. `rating` is enforced
+1-5 by a hand-written migration `CHECK` constraint (Prisma's schema DSL has no CHECK support — the
+same gap Phase 3's `EXCLUDE` constraint and Phase 4's partial unique index hit) plus a matching
+Zod bound in `lib/validation/crm.ts`. This model has no spec-level field list anywhere in the
+master build prompt — the Phase 8 build list just says "Reviews" — so its shape is this build's
+own design, documented as such rather than presented as a literal requirement.
+
+### customerId on Order / Reservation / CateringInquiry / CateringEvent
+Each of these four tables gained a nullable `customerId` column (FK to `Customer`, `ON DELETE SET
+NULL` — deleting a `Customer` profile preserves the transaction history, it just un-links it). The
+Prisma relation field is named `crmCustomer`, not `customer`, to stay visually distinct from each
+model's pre-existing `customer`/`customerUserId` relation (the optional login-account link). On
+`Order`/`Reservation`/`CateringInquiry` this column is client-settable, validated against the
+caller's own organization by `CustomerService.assertCustomerInOrg` before the row is created. On
+`CateringEvent` it is **not** client-settable — `CateringService.updateQuoteStatus`'s `ACCEPTED`
+transition copies it automatically from `CateringQuote.inquiry.customerId`, the same "the event
+inherits from its inquiry" logic already used for guest contact fields. None of the four columns
+are ever auto-populated by matching a guest's name/email/phone against existing customers — see
+`docs/architecture.md` § 16 for why that was deliberately not built.
+
+### Organization.crmSettings
+A nullable `Json` column added to the existing `Organization` table, mirroring the
+`Branch.openingHours` pattern from Phase 1: `null` means "use `DEFAULT_RFM_THRESHOLDS`"; a present
+value's `rfmThresholds` key can override any subset of the six RFM threshold fields, validated and
+merged field-by-field by `lib/crm/rfm.ts`'s `resolveRfmThresholds` (a malformed or out-of-range
+override for one field silently falls back to that field's own default).
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 8: `customers`, `customer_addresses`, `customer_preferences`, `customer_notes`,
-  `customer_tags`
 - Phase 9: `ingredients`, `units`, `recipes`, `recipe_items`, `inventory_items`,
   `inventory_transactions`, `stock_counts`, `waste_records`, `suppliers`, `purchase_orders`,
   `purchase_order_items`

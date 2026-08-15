@@ -471,8 +471,87 @@ response. Financial and inventory calculations are never trusted from the client
   `paymentSummary` assertion (`560.00` total, `200.00` deposit, `360.00` balance, `isFullyPaid`
   true after both); tenant isolation across packages, inquiries, quotes, events, and payments.
 
-**Not yet built** (Phases 8–16 per `docs/architecture.md`): CRM/RFM, inventory, accounting
-ledger, financial reporting, owner analytics, AI insights, notifications, hardening, deployment.
+**Phase 8 — CRM: done.**
+- Prisma schema additions: `Customer` (+ `CustomerAddress`, `CustomerPreference`, `CustomerNote`,
+  `CustomerTag`, `CustomerReview`), plus a `CustomerStatus` enum and nullable `customerId` FKs on
+  `Order`/`Reservation`/`CateringInquiry`/`CateringEvent`. See the "Phase 8 — CRM" comment block in
+  `schema.prisma` for the five numbered design decisions in full; the short version: `Customer` is
+  a new organization-scoped CRM profile, deliberately separate from `User` (same "role/account
+  grants capability, profile carries domain data" split Phase 6 used for `Driver` vs. the DRIVER
+  role) — `Customer.userId` is nullable and `@unique` for the minority who register, since most
+  customers (walk-ins, guest orders) never will; the `customerId` link on Order/Reservation/
+  CateringInquiry is client-settable and explicitly **not** auto-matched from guest name/email/
+  phone (fuzzy matching has real false-positive risk, not built) — staff attach a `Customer`
+  explicitly via the CRM UI; `CateringEvent.customerId` is the one exception, copied automatically
+  from the accepted quote's inquiry rather than client-settable, mirroring how the event itself is
+  auto-created; the relation field is named `crmCustomer` everywhere (not `customer`) to stay
+  visually distinct from each model's pre-existing `customer`/`customerUserId` field (the login-
+  account relation — an unrelated "was there an account" concept); `CustomerReview.rating` is
+  enforced 1–5 via a hand-written migration `CHECK` constraint (Prisma DSL has no CHECK support —
+  same gap as Phase 3's `EXCLUDE` constraint and Phase 4's partial unique index) plus a Zod-layer
+  bound, and every review is staff-recorded (`recordedByUserId`) — there is no customer-facing
+  review form.
+- `lib/crm/rfm.ts` implements master spec §32's RFM segmentation as a pure, DB-free function
+  (`classifySegment`) over metrics `CustomerService.getAnalytics` gathers — one fixed-precedence
+  decision chain, first match wins: `HIGH_VALUE` (spend alone, checked first so one huge purchase
+  isn't masked by "this is their first") → `NEW` (≤1 transaction) → `INACTIVE` → `AT_RISK` → `VIP`
+  (frequency AND spend) → `REGULAR` → `RETURNING` (default). The segment is **computed live on
+  every read, never stored** — this build has no background job scheduler (the same honest gap as
+  Phase 5's KDS polling), so a stored `segment` column would silently go stale. Thresholds are
+  configurable per master spec §32's literal instruction, via a nullable `Organization.crmSettings`
+  Json column (same "JSON column, code supplies default when null" pattern as `Branch.openingHours`
+  from Phase 1) — `resolveRfmThresholds` merges overrides over `DEFAULT_RFM_THRESHOLDS` field by
+  field, silently falling back to that field's default on a malformed or missing override.
+- `CustomerService` implements profile CRUD, addresses (with single-default exclusivity), key/value
+  preferences (upsert by `[customerId, key]`), notes, tags (duplicate rejected), reviews, and
+  `getAnalytics` — master spec §31's tracked metrics (total orders/reservations/catering orders,
+  total spending, average order value, first/last transaction, top-5 favorite products via
+  `orderItem.groupBy`, visit frequency) plus the RFM segment, all computed from real
+  `Order`/`Reservation`/`CateringEvent` rows with cancelled records excluded from spend/frequency.
+  `segmentBreakdown` (org-wide segment counts for the dashboard) runs `getAnalytics` once per
+  customer — an honestly-flagged N+1 pattern, fine at this build's demo/early-stage data volumes,
+  not something a real production deployment with thousands of customers should keep as-is.
+- Permissions: `customer:manage` added to the RBAC catalog (`customer:view` already existed in
+  Phase 1's forward-looking catalog) and granted to STAFF (routine front-of-house data entry when
+  taking phone/walk-in orders, unlike catering which stays manager-only) and MANAGER.
+- API routes under `/api/customers` (+ `/[customerId]`, `/[customerId]/analytics`, `/segments`,
+  `/[customerId]/addresses` (+ `/[addressId]`), `/[customerId]/preferences` (+ `/[key]`),
+  `/[customerId]/notes`, `/[customerId]/tags` (+ `/[tag]`)), plus a top-level `/api/customer-reviews`
+  (not nested under a specific customer, since a review can stand alone).
+- Dashboard UI: a CRM board (`/dashboard/customers` — org-scoped, no branch selector needed) with a
+  segment-breakdown summary, a new-customer form, a searchable/status-filterable customer list, and
+  a per-customer expandable profile panel (analytics stat tiles, favorite products, addresses,
+  preferences, tags, notes, reviews — all editable inline). Overview page gained a live "Customers"
+  card.
+- Seed data extended: Grace Villanueva (linked to the `customer` demo user, 2 backdated real orders
+  totalling exactly `873.60`, plus an address/preference/tag/note/review — the RETURNING case under
+  default thresholds), Marco dela Peña (guest-only, zero transactions — the NEW case), and Patricia
+  Cruz (retroactively linked onto her pre-existing Phase 7 catering inquiry/event, demonstrating
+  explicit linking even onto prior history — her single `100800.00` catering event makes her
+  `HIGH_VALUE`).
+- Unit tests: every `lib/validation/crm.ts` schema, and `lib/crm/rfm.ts`'s `classifySegment`
+  (every precedence branch, including a named regression test for a real bug caught during this
+  phase — see below) and `resolveRfmThresholds` (defaults, valid overrides, malformed/negative
+  overrides falling back). Integration tests: `CustomerService` CRUD (customer/address/preference/
+  note/tag/review) + tenant isolation; `getAnalytics` against real `OrderService.createOrder` calls
+  with **exact Decimal assertions** (two real orders totalling `940.80`, average `470.40`, a third
+  CANCELLED order excluded, favorite products ordered by real summed quantity); `segmentBreakdown`;
+  the automatic `customerId` copy from inquiry to `CateringEvent` at quote acceptance (walked
+  through the full `DRAFT→SENT→ACCEPTED` transition, asserting the resulting `HIGH_VALUE`
+  classification); and cross-org `customerId` rejection in `OrderService.createOrder`,
+  `ReservationService.createReservation`, and `CateringService.createInquiry`.
+- **A real bug caught during this phase, before it shipped:** the original `classifySegment`
+  checked `frequency <= 1 → NEW` *before* the `HIGH_VALUE` check, so a customer's very first
+  transaction — even a massive one, like a single catering event worth ₱100,800 — would always
+  read as NEW, contradicting `lib/crm/rfm.ts`'s own documented design intent ("a single very large
+  transaction... e.g. one very large catering event" is `HIGH_VALUE`'s own stated example). Caught
+  while designing the Patricia Cruz seed data and cross-checking it against the algorithm; fixed by
+  reordering the precedence chain (`HIGH_VALUE` now checked first) and covered with an explicit
+  regression test (`tests/unit/crm/rfm.test.ts`, "classifies a single very large transaction as
+  HIGH_VALUE, not NEW") plus the integration-level walk-through above.
+
+**Not yet built** (Phases 9–16 per `docs/architecture.md`): inventory, accounting ledger, financial
+reporting, owner analytics, AI insights, notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -656,6 +735,29 @@ ledger, financial reporting, owner analytics, AI insights, notifications, harden
   other service file hits). Zero new diagnostic categories. No `TS2322` key-prop diagnostic
   appeared — `catering-board.tsx`'s list renders (packages, inquiries, quotes, events) all render
   their `.map()` rows inline, same discipline as Phase 6.
+  Phase 8's migration (`prisma/migrations/20260815050000_phase8_crm/migration.sql`) adds one
+  JSONB column to `organizations`, four nullable `customerId` columns across
+  `orders`/`reservations`/`catering_inquiries`/`catering_events`, one enum, and six new tables;
+  hand-written and applied clean to both the dev and test local Postgres databases. An
+  8-assertion smoke test verified: duplicate `customers.userId` rejected by the unique
+  constraint; the `customer_reviews.rating` `CHECK` constraint rejects a rating of 6; a duplicate
+  `(customerId, key)` preference is rejected; two orders' totals sum exactly to `896.00` for a
+  customer; deleting a customer cascades to its addresses/preferences/notes/tags; deleting a
+  customer `SET NULL`s `orders.customerId` and `customer_reviews.customerId` rather than blocking
+  (history is preserved even once the profile is gone); `Organization.crmSettings` JSON
+  round-trips; and an undocumented `CustomerStatus` value is rejected by the enum type. All
+  passed. The `git stash -u` (no local changes to stash — the working tree was already committed)
+  before/after TypeScript diff (checked out to the pre-Phase-8 commit `5ceb2d1`, re-ran
+  `tsc --noEmit`, checked back out to the tip) confirmed the same result as every prior phase:
+  baseline was 1,538 diagnostics, after Phase 8 was 1,745 — 207 more, entirely inside
+  already-established categories (`TS7026` +138, `TS7006` +49, `TS2307` +19, `TS2882` +1 — one
+  new `server-only` import in `CustomerService.ts`, the identical pattern every other service file
+  hits). Zero new diagnostic categories. The two pre-existing non-artifact diagnostics
+  (`TS2345` in `app/dashboard/layout.tsx`, `TS18046` in `lib/utils/api-error.ts`) are unchanged
+  from every prior phase's count — confirmed still not something Phase 8 touched or introduced.
+  No `TS2322` key-prop diagnostic appeared — `customer-board.tsx`'s list renders (customers,
+  addresses, preferences, tags, notes, reviews, favorite products) all render their `.map()` rows
+  inline, same discipline as Phases 6-7.
 
 ## Required Environment Variables
 
