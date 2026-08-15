@@ -31,6 +31,9 @@ export const createReservationSchema = z
     durationMinutes: DURATION_MINUTES,
     guestCount: z.number().int().min(1).max(500),
     customerUserId: z.string().trim().min(1).optional(),
+    // Phase 8 — CRM. Optional link to a Customer/CRM profile — see the
+    // matching comment on createOrderSchema.customerId.
+    customerId: z.string().trim().min(1).optional(),
     guestName: z.string().trim().min(1).max(150),
     guestEmail: z.string().trim().toLowerCase().email().optional(),
     guestPhone: z.string().trim().max(30).optional(),

@@ -4,6 +4,7 @@ import type { OrderStatus, TableStatus } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
+import { CustomerService } from '@/services/crm/CustomerService';
 import type {
   CreateOrderInput,
   ListOrdersQueryInput,
@@ -127,6 +128,9 @@ export class OrderService {
       const customer = await prisma.user.findFirst({ where: { id: input.customerUserId, organizationId } });
       if (!customer) throw new NotFoundError('Customer account');
     }
+    if (input.customerId) {
+      await CustomerService.assertCustomerInOrg(organizationId, input.customerId);
+    }
 
     // Phase 6: an optional delivery zone, whose CURRENT fee is snapshotted
     // onto both the order (so total/payments/invoices are correct — see
@@ -168,6 +172,7 @@ export class OrderService {
             branchId,
             type: input.type,
             customerUserId: input.customerUserId,
+            customerId: input.customerId,
             guestName: input.guestName,
             guestEmail: input.guestEmail,
             guestPhone: input.guestPhone,

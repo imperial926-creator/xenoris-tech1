@@ -30,6 +30,11 @@ export const createOrderSchema = z
     // Omit to place a delivery order without categorizing a zone yet.
     deliveryZoneId: z.string().trim().min(1).optional(),
     customerUserId: z.string().trim().min(1).optional(),
+    // Phase 8 — CRM. Optional link to a Customer/CRM profile, distinct from
+    // customerUserId (a login account) — see the "Phase 8 — CRM" comment
+    // block in schema.prisma. Not auto-matched from guest fields; the
+    // caller (staff, via the CRM UI's customer picker) supplies it.
+    customerId: z.string().trim().min(1).optional(),
     guestName: z.string().trim().max(150).optional(),
     guestEmail: z.string().trim().toLowerCase().email().optional(),
     guestPhone: z.string().trim().max(30).optional(),

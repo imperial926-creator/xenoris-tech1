@@ -38,6 +38,7 @@ export const PERMISSIONS = {
   DELIVERY_MANAGE: 'delivery:manage',
   CATERING_MANAGE: 'catering:manage',
   CUSTOMER_VIEW: 'customer:view',
+  CUSTOMER_MANAGE: 'customer:manage',
   INVENTORY_MANAGE: 'inventory:manage',
   FINANCE_VIEW: 'finance:view',
   FINANCE_MANAGE: 'finance:manage',
@@ -66,6 +67,7 @@ export const PERMISSION_CATALOG: Array<{ key: PermissionKey; description: string
   { key: PERMISSIONS.DELIVERY_MANAGE, description: 'Manage deliveries/drivers (Phase 6)' },
   { key: PERMISSIONS.CATERING_MANAGE, description: 'Manage catering inquiries/events (Phase 7)' },
   { key: PERMISSIONS.CUSTOMER_VIEW, description: 'View customer CRM records (Phase 8)' },
+  { key: PERMISSIONS.CUSTOMER_MANAGE, description: 'Create/update customer profiles, addresses, preferences, notes, tags, reviews (Phase 8)' },
   { key: PERMISSIONS.INVENTORY_MANAGE, description: 'Manage inventory/purchasing (Phase 9)' },
   { key: PERMISSIONS.FINANCE_VIEW, description: 'View financial reports (Phase 10/11)' },
   { key: PERMISSIONS.FINANCE_MANAGE, description: 'Post/reverse journal entries (Phase 10)' },
@@ -100,6 +102,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleNameLiteral, PermissionKey[]> 
     // -of-house staff, not just managers, same reasoning as ORDER_MANAGE
     // above (Phase 6).
     PERMISSIONS.DELIVERY_MANAGE,
+    // Taking a phone/walk-in order routinely means creating or updating a
+    // customer profile, jotting a note ("allergic to peanuts"), or tagging
+    // a preference — routine front-of-house data entry, unlike catering
+    // (Phase 7), which stayed manager-only (Phase 8).
+    PERMISSIONS.CUSTOMER_VIEW,
+    PERMISSIONS.CUSTOMER_MANAGE,
   ],
   MANAGER: [
     PERMISSIONS.BRANCH_VIEW,
@@ -116,6 +124,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleNameLiteral, PermissionKey[]> 
     PERMISSIONS.DELIVERY_MANAGE,
     PERMISSIONS.CATERING_MANAGE,
     PERMISSIONS.CUSTOMER_VIEW,
+    PERMISSIONS.CUSTOMER_MANAGE,
     PERMISSIONS.INVENTORY_MANAGE,
     PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.ANALYTICS_VIEW,

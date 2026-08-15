@@ -32,6 +32,11 @@ export type UpdateCateringPackageInput = z.infer<typeof updateCateringPackageSch
 
 export const createCateringInquirySchema = z.object({
   customerUserId: z.string().trim().min(1).optional(),
+  // Phase 8 — CRM. Optional link to a Customer/CRM profile — see the
+  // matching comment on createOrderSchema.customerId. Propagated onto the
+  // CateringEvent automatically when the quote is accepted (not itself
+  // settable on the event).
+  customerId: z.string().trim().min(1).optional(),
   guestName: z.string().trim().min(1).max(150).optional(),
   guestEmail: z.string().trim().toLowerCase().email().optional(),
   guestPhone: z.string().trim().max(30).optional(),

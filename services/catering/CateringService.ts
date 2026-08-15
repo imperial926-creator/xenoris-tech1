@@ -4,6 +4,7 @@ import type { CateringEventStatus, CateringQuoteStatus } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
+import { CustomerService } from '@/services/crm/CustomerService';
 import type {
   CreateCateringPackageInput,
   UpdateCateringPackageInput,
@@ -154,6 +155,9 @@ export class CateringService {
       const customer = await prisma.user.findFirst({ where: { id: input.customerUserId, organizationId } });
       if (!customer) throw new NotFoundError('Customer account');
     }
+    if (input.customerId) {
+      await CustomerService.assertCustomerInOrg(organizationId, input.customerId);
+    }
     if (input.packageId) {
       await this.getPackage(organizationId, branchId, input.packageId);
     }
@@ -168,6 +172,7 @@ export class CateringService {
           organizationId,
           branchId,
           customerUserId: input.customerUserId,
+          customerId: input.customerId,
           guestName: input.guestName,
           guestEmail: input.guestEmail,
           guestPhone: input.guestPhone,
@@ -437,6 +442,9 @@ export class CateringService {
             branchId,
             quoteId: quote.id,
             customerUserId: quote.inquiry.customerUserId,
+            // Phase 8 — CRM. Copied from the inquiry, not client-settable —
+            // see the "Phase 8 — CRM" comment block in schema.prisma (#2).
+            customerId: quote.inquiry.customerId,
             guestName: quote.inquiry.guestName,
             guestEmail: quote.inquiry.guestEmail,
             guestPhone: quote.inquiry.guestPhone,

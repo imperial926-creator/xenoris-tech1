@@ -4,6 +4,7 @@ import type { ReservationStatus } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
+import { CustomerService } from '@/services/crm/CustomerService';
 import type {
   AvailabilityQueryInput,
   CreateReservationInput,
@@ -160,6 +161,9 @@ export class ReservationService {
       });
       if (!customer) throw new NotFoundError('Customer account');
     }
+    if (input.customerId) {
+      await CustomerService.assertCustomerInOrg(organizationId, input.customerId);
+    }
 
     try {
       return await prisma.$transaction(async (tx) => {
@@ -168,6 +172,7 @@ export class ReservationService {
             organizationId,
             branchId,
             customerUserId: input.customerUserId,
+            customerId: input.customerId,
             guestName: input.guestName,
             guestEmail: input.guestEmail,
             guestPhone: input.guestPhone,
