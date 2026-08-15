@@ -885,6 +885,211 @@ async function main() {
   });
   console.log('  seeded 1 dispatched delivery order (ASSIGNED, fee included in order total)');
 
+  // --- Phase 7: catering packages, inquiries at each funnel stage --------
+  // Two packages, and three inquiries showing the funnel at NEW (no quote
+  // yet), QUOTED (a SENT quote awaiting the customer's response), and
+  // CONVERTED (an ACCEPTED quote that auto-created its event, with a
+  // deposit already recorded) — the same "seed every status, not just the
+  // happy path" convention every prior phase's seed data follows.
+  const cateringPackageDefs = [
+    { branchId: branchA.id, name: '[DEMO] Silver Package', pricePerGuest: '500.00' },
+    { branchId: branchA.id, name: '[DEMO] Gold Package', pricePerGuest: '800.00' },
+  ];
+  const cateringPackageByName = new Map<string, { id: string; pricePerGuest: string }>();
+  for (const def of cateringPackageDefs) {
+    const pkg = await prisma.cateringPackage.upsert({
+      where: { branchId_name: { branchId: def.branchId, name: def.name } },
+      update: {},
+      create: { organizationId: organization.id, branchId: def.branchId, name: def.name, pricePerGuest: def.pricePerGuest },
+    });
+    cateringPackageByName.set(def.name, { id: pkg.id, pricePerGuest: def.pricePerGuest });
+  }
+  console.log(`  seeded ${cateringPackageDefs.length} catering packages`);
+
+  const silverPackage = cateringPackageByName.get('[DEMO] Silver Package')!;
+  const goldPackage = cateringPackageByName.get('[DEMO] Gold Package')!;
+
+  // Inquiry 1: NEW, no quote yet.
+  const inquiryNewId = `${organization.id}-catering-inquiry-new`;
+  await prisma.cateringInquiry.upsert({
+    where: { id: inquiryNewId },
+    update: {},
+    create: {
+      id: inquiryNewId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      guestName: '[DEMO] Liza Santos',
+      guestEmail: 'liza.santos@example.com',
+      guestPhone: '+63 917 000 1111',
+      eventType: 'Birthday Party',
+      eventDate: new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000),
+      location: '[DEMO] Client residence, Makati',
+      guestCount: 50,
+      status: 'NEW',
+      specialRequests: '[DEMO] One vegetarian and one halal guest.',
+    },
+  });
+
+  // Inquiry 2 + Quote (SENT): QUOTED, awaiting customer response.
+  const inquiryQuotedId = `${organization.id}-catering-inquiry-quoted`;
+  await prisma.cateringInquiry.upsert({
+    where: { id: inquiryQuotedId },
+    update: {},
+    create: {
+      id: inquiryQuotedId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      guestName: '[DEMO] Marco Reyes',
+      guestEmail: 'marco.reyes@example.com',
+      guestPhone: '+63 917 000 2222',
+      eventType: 'Corporate Event',
+      eventDate: new Date(now.getTime() + 35 * 24 * 60 * 60 * 1000),
+      location: '[DEMO] Ayala Tower Function Hall, Makati',
+      guestCount: 30,
+      packageId: silverPackage.id,
+      status: 'QUOTED',
+    },
+  });
+  // Quote totals, hand-computed against the master spec's formula (Food +
+  // Staffing + Equipment + Transportation + Setup + Service Fees -
+  // Discounts + Taxes = TOTAL), independently checkable:
+  //   food 30 x 500.00 = 15000.00
+  //   + staffing 2000.00 + equipment 500.00 + transportation 500.00
+  //   + setup 500.00 + serviceFee 1000.00 - discount 0.00 = 19500.00
+  //   + tax (12%) 2340.00 = 21840.00
+  const quoteSentId = `${organization.id}-catering-quote-sent`;
+  const quoteSent = await prisma.cateringQuote.upsert({
+    where: { id: quoteSentId },
+    update: {},
+    create: {
+      id: quoteSentId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      inquiryId: inquiryQuotedId,
+      packageId: silverPackage.id,
+      guestCount: 30,
+      foodTotal: '15000.00',
+      staffingTotal: '2000.00',
+      equipmentTotal: '500.00',
+      transportationTotal: '500.00',
+      setupTotal: '500.00',
+      serviceFeeTotal: '1000.00',
+      discountTotal: '0.00',
+      taxTotal: '2340.00',
+      total: '21840.00',
+      status: 'SENT',
+      sentAt: now,
+    },
+  });
+  const quoteSentItemExists = await prisma.cateringQuoteItem.findFirst({ where: { quoteId: quoteSent.id } });
+  if (!quoteSentItemExists) {
+    await prisma.cateringQuoteItem.create({
+      data: { quoteId: quoteSent.id, description: '[DEMO] Silver Package (per guest)', quantity: 30, unitPrice: '500.00', lineTotal: '15000.00' },
+    });
+  }
+
+  // Inquiry 3 + Quote (ACCEPTED) + Event (SCHEDULED) + deposit payment:
+  // CONVERTED, demonstrating the funnel's automatic accept-to-event step.
+  const inquiryConvertedId = `${organization.id}-catering-inquiry-converted`;
+  await prisma.cateringInquiry.upsert({
+    where: { id: inquiryConvertedId },
+    update: {},
+    create: {
+      id: inquiryConvertedId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      guestName: '[DEMO] Patricia Cruz',
+      guestEmail: 'patricia.cruz@example.com',
+      guestPhone: '+63 917 000 3333',
+      eventType: 'Wedding Reception',
+      eventDate: new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000),
+      location: '[DEMO] Grand Ballroom, Makati',
+      guestCount: 100,
+      packageId: goldPackage.id,
+      status: 'CONVERTED',
+    },
+  });
+  // Quote totals: food 100 x 800.00 = 80000.00 + staffing 5000.00
+  // + equipment 2000.00 + transportation 1000.00 + setup 1000.00
+  // + serviceFee 3000.00 - discount 2000.00 = 90000.00 + tax (12%)
+  // 10800.00 = 100800.00.
+  const quoteAcceptedId = `${organization.id}-catering-quote-accepted`;
+  const quoteAccepted = await prisma.cateringQuote.upsert({
+    where: { id: quoteAcceptedId },
+    update: {},
+    create: {
+      id: quoteAcceptedId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      inquiryId: inquiryConvertedId,
+      packageId: goldPackage.id,
+      guestCount: 100,
+      foodTotal: '80000.00',
+      staffingTotal: '5000.00',
+      equipmentTotal: '2000.00',
+      transportationTotal: '1000.00',
+      setupTotal: '1000.00',
+      serviceFeeTotal: '3000.00',
+      discountTotal: '2000.00',
+      taxTotal: '10800.00',
+      total: '100800.00',
+      status: 'ACCEPTED',
+      sentAt: now,
+      respondedAt: now,
+    },
+  });
+  const quoteAcceptedItemExists = await prisma.cateringQuoteItem.findFirst({ where: { quoteId: quoteAccepted.id } });
+  if (!quoteAcceptedItemExists) {
+    await prisma.cateringQuoteItem.create({
+      data: { quoteId: quoteAccepted.id, description: '[DEMO] Gold Package (per guest)', quantity: 100, unitPrice: '800.00', lineTotal: '80000.00' },
+    });
+  }
+
+  const cateringEventId = `${organization.id}-catering-event-scheduled`;
+  const cateringEvent = await prisma.cateringEvent.upsert({
+    where: { quoteId: quoteAccepted.id },
+    update: {},
+    create: {
+      id: cateringEventId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      quoteId: quoteAccepted.id,
+      guestName: '[DEMO] Patricia Cruz',
+      guestEmail: 'patricia.cruz@example.com',
+      guestPhone: '+63 917 000 3333',
+      eventType: 'Wedding Reception',
+      eventDate: new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000),
+      location: '[DEMO] Grand Ballroom, Makati',
+      guestCount: 100,
+      status: 'SCHEDULED',
+      total: '100800.00',
+      depositAmount: '30000.00',
+    },
+  });
+  const cateringEventItemExists = await prisma.cateringEventItem.findFirst({ where: { eventId: cateringEvent.id } });
+  if (!cateringEventItemExists) {
+    await prisma.cateringEventItem.create({
+      data: { eventId: cateringEvent.id, description: '[DEMO] Gold Package (per guest)', quantity: 100, unitPrice: '800.00', lineTotal: '80000.00' },
+    });
+  }
+  const depositPaymentId = `${organization.id}-catering-payment-deposit`;
+  await prisma.cateringPayment.upsert({
+    where: { id: depositPaymentId },
+    update: {},
+    create: {
+      id: depositPaymentId,
+      organizationId: organization.id,
+      branchId: branchA.id,
+      eventId: cateringEvent.id,
+      type: 'DEPOSIT',
+      method: 'BANK_TRANSFER',
+      amount: '30000.00',
+      status: 'COMPLETED',
+      note: '[DEMO] 30% deposit received on quote acceptance.',
+    },
+  });
+  console.log('  seeded 3 catering inquiries (NEW, QUOTED, CONVERTED-with-scheduled-event-and-deposit)');
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
