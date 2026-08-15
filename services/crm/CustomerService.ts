@@ -19,6 +19,7 @@ const PROFILE_INCLUDE = {
   preferences: { orderBy: { key: 'asc' } },
   notes: { orderBy: { createdAt: 'desc' } },
   tags: { orderBy: { tag: 'asc' } },
+  reviews: { orderBy: { createdAt: 'desc' } },
 } satisfies Prisma.CustomerInclude;
 
 // Order statuses/catering event statuses excluded from spend/frequency —
