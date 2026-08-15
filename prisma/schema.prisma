@@ -42,6 +42,11 @@ model Organization {
   deliveryZones      DeliveryZone[]
   drivers            Driver[]
   deliveryOrders     DeliveryOrder[]
+  cateringPackages   CateringPackage[]
+  cateringInquiries  CateringInquiry[]
+  cateringQuotes     CateringQuote[]
+  cateringEvents     CateringEvent[]
+  cateringPayments   CateringPayment[]
 
   @@map("organizations")
 }
@@ -77,6 +82,11 @@ model Branch {
   deliveryZones DeliveryZone[]
   drivers       Driver[]
   deliveryOrders DeliveryOrder[]
+  cateringPackages  CateringPackage[]
+  cateringInquiries CateringInquiry[]
+  cateringQuotes    CateringQuote[]
+  cateringEvents    CateringEvent[]
+  cateringPayments  CateringPayment[]
 
   @@index([organizationId])
   @@map("branches")
@@ -118,6 +128,11 @@ model User {
   // (typically, but not necessarily only, those with the DRIVER role) — see
   // the "Phase 6 — Delivery" comment block near the Driver model.
   driverProfile Driver?
+  // Catering inquiries/events made under this user's account — optional,
+  // same "was there an account" pattern as Reservation/Order's
+  // customerUserId (Phase 7).
+  cateringInquiries CateringInquiry[]
+  cateringEvents    CateringEvent[]
 
   // Email is unique per organization, not globally — the same person may be a
   // customer of multiple independent restaurant organizations on the platform.
@@ -1083,4 +1098,298 @@ model DriverAssignment {
   @@index([deliveryOrderId])
   @@index([driverId])
   @@map("driver_assignments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 — Catering
+// ---------------------------------------------------------------------------
+//
+// Master spec §21-22 names all seven tables below explicitly and specifies
+// the funnel: Inquiry -> Quote -> Accept -> Deposit -> Event -> Final
+// payment. Five design decisions worth recording:
+//
+// 1. `CateringQuote` carries the fee breakdown the spec's quotation formula
+//    requires (Food + Staffing + Equipment + Transportation + Setup +
+//    Service Fees - Discounts + Taxes = TOTAL) as named Decimal columns,
+//    not a generic "line items of arbitrary category" table. Only the food
+//    portion gets real line items (`CateringQuoteItem`, mirroring
+//    `OrderItem`) because that is the part with a genuine per-unit
+//    breakdown (dish x quantity x price); staffing/equipment/transportation
+//    /setup/service-fee are quoted as flat negotiated amounts in real
+//    catering practice, not itemized against a fixed catalog this build
+//    doesn't have (no staffing-rate-card or equipment-rental system
+//    exists). `CateringQuote.total` is server-computed from these columns
+//    by `CateringService`, the same "never trust a client-submitted total"
+//    rule Phase 4 established for `Order`.
+// 2. `CateringEvent` is a 1:1 companion to `CateringQuote` (`@unique
+//    quoteId`), created automatically — in the same transaction as the
+//    quote's ACCEPTED transition — exactly as master spec §22 states ("When
+//    accepted, create the appropriate catering event"). Same reasoning as
+//    Phase 6's `Order` -> `DeliveryOrder` split: an event only ever exists
+//    for an accepted quote, so modeling it as a nullable set of columns on
+//    `CateringQuote` itself would be equivalent but muddier, and a 1:1
+//    table matches the master spec's own table list. `CateringEvent.total`
+//    and `depositAmount` are snapshotted from the quote at accept time
+//    (the same "menu prices can change later, order history shouldn't"
+//    principle `OrderItem` established), and `CateringEventItem` rows are
+//    snapshotted from `CateringQuoteItem` for the same reason.
+// 3. `CateringPayment` is its own real table (as the master spec's table
+//    list requires), not fields-on-the-row the way Phase 3 modeled
+//    `Reservation`'s single deposit. Catering genuinely needs more than one
+//    payment over the funnel's lifetime (a deposit, then a final balance
+//    payment, sometimes more) — the same reason Phase 4 gave `Order` a real
+//    `OrderPayment` table instead of a single field. `type` (DEPOSIT /
+//    BALANCE) records which stage of the funnel a payment closes out;
+//    `method`/`status` reuse the existing `OrderPaymentMethod`/
+//    `OrderPaymentStatus` enums rather than duplicating them, because "how
+//    was this paid" and "did it clear or get refunded" are domain concepts
+//    independent of order vs. catering — one enum, two payment tables, not
+//    two enums for the same real-world values.
+// 4. `CateringInquiry`/`CateringEvent` use the same optional
+//    `customerUserId` + guest-snapshot (`guestName`/`guestEmail`/
+//    `guestPhone`) pattern `Order`/`Reservation` already established —
+//    there is still no dedicated `customers` table (that is Phase 8's CRM
+//    scope), so a catering customer is either a registered `User` or a
+//    plain guest-contact snapshot, exactly like every other customer-facing
+//    entity built so far.
+// 5. No real e-signature, PDF quote generation, or customer self-service
+//    portal — `CateringQuote.status` (DRAFT/SENT/VIEWED/ACCEPTED/REJECTED/
+//    EXPIRED/CANCELLED) and its `sentAt`/`viewedAt`/`respondedAt`/
+//    `expiresAt` timestamps are staff-recorded state transitions
+//    (`CateringService`), not the product of an actual customer-facing
+//    quote-viewing UI or e-signature integration — neither is configured
+//    (see docs/architecture.md § 7 Risks). This mirrors Phase 4's "no
+//    payment provider configured, payments are staff-recorded" stance
+//    applied to the quoting funnel instead.
+
+enum CateringInquiryStatus {
+  NEW
+  QUOTED
+  CONVERTED
+  CANCELLED
+}
+
+enum CateringQuoteStatus {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum CateringEventStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum CateringPaymentType {
+  DEPOSIT
+  BALANCE
+}
+
+model CateringPackage {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  name           String
+  description    String?
+  pricePerGuest  Decimal  @db.Decimal(10, 2)
+  minGuests      Int?
+  maxGuests      Int?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  inquiries    CateringInquiry[]
+  quotes       CateringQuote[]
+
+  @@unique([branchId, name])
+  @@index([organizationId])
+  @@map("catering_packages")
+}
+
+model CateringInquiry {
+  id             String                @id @default(cuid())
+  organizationId String
+  branchId       String
+
+  // Optional registered account, independent of the guest snapshot below —
+  // same pattern as Order/Reservation (see module header comment #4).
+  customerUserId String?
+  guestName      String?
+  guestEmail     String?
+  guestPhone     String?
+
+  eventType         String
+  eventDate         DateTime
+  location          String
+  guestCount        Int
+  packageId         String?
+  menuRequirements  String?
+  equipmentRequests String?
+  staffRequests     String?
+  setupRequests     String?
+  deliveryRequested Boolean               @default(false)
+  deliveryAddress   String?
+  specialRequests   String?
+  status            CateringInquiryStatus @default(NEW)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     User?            @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  package      CateringPackage? @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  quotes       CateringQuote[]
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([customerUserId])
+  @@map("catering_inquiries")
+}
+
+model CateringQuote {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  inquiryId      String
+  packageId      String?
+  guestCount     Int
+
+  // Server-computed by CateringService, mirroring the master spec's
+  // quotation formula — see module header comment #1 for why only the food
+  // portion (CateringQuoteItem) is itemized.
+  foodTotal           Decimal @default(0) @db.Decimal(10, 2)
+  staffingTotal       Decimal @default(0) @db.Decimal(10, 2)
+  equipmentTotal      Decimal @default(0) @db.Decimal(10, 2)
+  transportationTotal Decimal @default(0) @db.Decimal(10, 2)
+  setupTotal          Decimal @default(0) @db.Decimal(10, 2)
+  serviceFeeTotal     Decimal @default(0) @db.Decimal(10, 2)
+  discountTotal       Decimal @default(0) @db.Decimal(10, 2)
+  taxTotal            Decimal @default(0) @db.Decimal(10, 2)
+  total               Decimal @default(0) @db.Decimal(10, 2)
+
+  status             CateringQuoteStatus @default(DRAFT)
+  sentAt             DateTime?
+  viewedAt           DateTime?
+  respondedAt        DateTime?
+  expiresAt          DateTime?
+  rejectionReason    String?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  inquiry      CateringInquiry     @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  package      CateringPackage?    @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  items        CateringQuoteItem[]
+  event        CateringEvent?
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([inquiryId])
+  @@map("catering_quotes")
+}
+
+model CateringQuoteItem {
+  id          String  @id @default(cuid())
+  quoteId     String
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @db.Decimal(10, 2)
+  lineTotal   Decimal @db.Decimal(10, 2)
+
+  quote CateringQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@index([quoteId])
+  @@map("catering_quote_items")
+}
+
+model CateringEvent {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  quoteId        String @unique
+
+  // Optional registered account, independent of the guest snapshot below —
+  // same pattern as Order/Reservation (see module header comment #4).
+  customerUserId String?
+  guestName      String?
+  guestEmail     String?
+  guestPhone     String?
+
+  eventType  String
+  eventDate  DateTime
+  location   String
+  guestCount Int
+  status     CateringEventStatus @default(SCHEDULED)
+
+  // Snapshotted from the accepted CateringQuote at creation time — see
+  // module header comment #2 for why (menu/pricing can change later, event
+  // history shouldn't).
+  total         Decimal @db.Decimal(10, 2)
+  depositAmount Decimal @default(0) @db.Decimal(10, 2)
+
+  notes              String?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  quote        CateringQuote       @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  customer     User?               @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  items        CateringEventItem[]
+  payments     CateringPayment[]
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([customerUserId])
+  @@map("catering_events")
+}
+
+model CateringEventItem {
+  id          String  @id @default(cuid())
+  eventId     String
+  description String
+  quantity    Int
+  unitPrice   Decimal @db.Decimal(10, 2)
+  lineTotal   Decimal @db.Decimal(10, 2)
+
+  event CateringEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@map("catering_event_items")
+}
+
+model CateringPayment {
+  id             String              @id @default(cuid())
+  organizationId String
+  branchId       String
+  eventId        String
+  type           CateringPaymentType
+  method         OrderPaymentMethod
+  amount         Decimal             @db.Decimal(10, 2)
+  status         OrderPaymentStatus  @default(COMPLETED)
+  note           String?
+  recordedByUserId String?
+  createdAt      DateTime            @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  event        CateringEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([eventId])
+  @@map("catering_payments")
 }
