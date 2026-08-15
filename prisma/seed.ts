@@ -1294,6 +1294,285 @@ async function main() {
     "  linked [DEMO] Patricia Cruz's existing catering funnel to her new customer profile (HIGH_VALUE via a single ₱100,800.00 event)",
   );
 
+  // --- Phase 9: Inventory — units, ingredients, recipes, real stock movement ---
+  // A single-level unit conversion chain (kg/g, L/ml — see lib/inventory/
+  // units.ts), four ingredients tracked at branchA, a recipe on Chicken
+  // Inasal Meal and Iced Tea (so recipe-based consumption has something
+  // real to walk through once an order completes), and one real example of
+  // each of the four ways stock moves in this build: an initial ADJUSTMENT
+  // (every stock line's starting balance), a PURCHASE (a received PO,
+  // which also demonstrates "last purchase cost wins" on Ingredient.
+  // costPerUnit), a WASTE record, and a COUNT_CORRECTION from a completed
+  // stock count. Disposable Cup is deliberately seeded below its
+  // reorderPoint so the dashboard's "Inventory Alerts" card has a real LOW
+  // item to show, not just zeros.
+  const kilogram = await prisma.unit.upsert({
+    where: { id: `${organization.id}-unit-kg` },
+    update: {},
+    create: { id: `${organization.id}-unit-kg`, organizationId: organization.id, name: 'Kilogram', abbreviation: 'kg' },
+  });
+  const gram = await prisma.unit.upsert({
+    where: { id: `${organization.id}-unit-g` },
+    update: {},
+    create: { id: `${organization.id}-unit-g`, organizationId: organization.id, name: 'Gram', abbreviation: 'g', baseUnitId: kilogram.id, conversionFactor: 1000 },
+  });
+  const liter = await prisma.unit.upsert({
+    where: { id: `${organization.id}-unit-l` },
+    update: {},
+    create: { id: `${organization.id}-unit-l`, organizationId: organization.id, name: 'Liter', abbreviation: 'L' },
+  });
+  const milliliter = await prisma.unit.upsert({
+    where: { id: `${organization.id}-unit-ml` },
+    update: {},
+    create: { id: `${organization.id}-unit-ml`, organizationId: organization.id, name: 'Milliliter', abbreviation: 'ml', baseUnitId: liter.id, conversionFactor: 1000 },
+  });
+  const piece = await prisma.unit.upsert({
+    where: { id: `${organization.id}-unit-pc` },
+    update: {},
+    create: { id: `${organization.id}-unit-pc`, organizationId: organization.id, name: 'Piece', abbreviation: 'pc' },
+  });
+  console.log('  seeded 5 units (kg/g, L/ml, pc)');
+
+  const chickenIngredient = await prisma.ingredient.upsert({
+    where: { id: `${organization.id}-ingredient-chicken` },
+    update: {},
+    create: { id: `${organization.id}-ingredient-chicken`, organizationId: organization.id, name: '[DEMO] Chicken', stockUnitId: kilogram.id, costPerUnit: '180.00' },
+  });
+  const riceIngredient = await prisma.ingredient.upsert({
+    where: { id: `${organization.id}-ingredient-rice` },
+    update: {},
+    create: { id: `${organization.id}-ingredient-rice`, organizationId: organization.id, name: '[DEMO] Rice', stockUnitId: kilogram.id, costPerUnit: '45.00' },
+  });
+  const sauceIngredient = await prisma.ingredient.upsert({
+    where: { id: `${organization.id}-ingredient-inasal-sauce` },
+    update: {},
+    create: { id: `${organization.id}-ingredient-inasal-sauce`, organizationId: organization.id, name: '[DEMO] Inasal Marinade', stockUnitId: liter.id, costPerUnit: '120.00' },
+  });
+  const cupIngredient = await prisma.ingredient.upsert({
+    where: { id: `${organization.id}-ingredient-cup` },
+    update: {},
+    create: { id: `${organization.id}-ingredient-cup`, organizationId: organization.id, name: '[DEMO] Disposable Cup', stockUnitId: piece.id, costPerUnit: '2.50' },
+  });
+  console.log('  seeded 4 ingredients (Chicken, Rice, Inasal Marinade, Disposable Cup)');
+
+  const chickenInasalRecipe = await prisma.recipe.upsert({
+    where: { menuItemId: chickenInasal.id },
+    update: {},
+    create: { id: `${organization.id}-recipe-chicken-inasal`, organizationId: organization.id, menuItemId: chickenInasal.id, yieldQuantity: '1' },
+  });
+  const chickenInasalRecipeItemsExist = await prisma.recipeItem.findFirst({ where: { recipeId: chickenInasalRecipe.id } });
+  if (!chickenInasalRecipeItemsExist) {
+    await prisma.recipeItem.createMany({
+      data: [
+        { recipeId: chickenInasalRecipe.id, ingredientId: chickenIngredient.id, quantity: '200', unitId: gram.id },
+        { recipeId: chickenInasalRecipe.id, ingredientId: riceIngredient.id, quantity: '250', unitId: gram.id },
+        { recipeId: chickenInasalRecipe.id, ingredientId: sauceIngredient.id, quantity: '30', unitId: milliliter.id },
+      ],
+    });
+  }
+  const iceTeaRecipe = await prisma.recipe.upsert({
+    where: { menuItemId: iceTea.id },
+    update: {},
+    create: { id: `${organization.id}-recipe-iced-tea`, organizationId: organization.id, menuItemId: iceTea.id, yieldQuantity: '1' },
+  });
+  const iceTeaRecipeItemsExist = await prisma.recipeItem.findFirst({ where: { recipeId: iceTeaRecipe.id } });
+  if (!iceTeaRecipeItemsExist) {
+    await prisma.recipeItem.create({ data: { recipeId: iceTeaRecipe.id, ingredientId: cupIngredient.id, quantity: '1', unitId: piece.id } });
+  }
+  console.log('  seeded recipes: Chicken Inasal Meal (200g chicken, 250g rice, 30ml marinade), Iced Tea (1 cup)');
+
+  // Stock lines at branchA, each starting from an initial ADJUSTMENT
+  // transaction — schema.prisma's "Phase 9 — Inventory" comment block #2:
+  // even the very first balance gets a real ledger row.
+  async function seedInventoryItem(args: {
+    idSuffix: string;
+    ingredientId: string;
+    initialQuantity: string;
+    reorderPoint: string;
+    criticalPoint: string;
+  }) {
+    const itemId = `${organization.id}-invitem-${args.idSuffix}`;
+    const item = await prisma.inventoryItem.upsert({
+      where: { id: itemId },
+      update: {},
+      create: {
+        id: itemId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        ingredientId: args.ingredientId,
+        quantityOnHand: args.initialQuantity,
+        reorderPoint: args.reorderPoint,
+        criticalPoint: args.criticalPoint,
+      },
+    });
+    const initialTxnExists = await prisma.inventoryTransaction.findFirst({
+      where: { inventoryItemId: item.id, type: 'ADJUSTMENT', referenceType: 'InventoryItem', referenceId: item.id },
+    });
+    if (!initialTxnExists) {
+      await prisma.inventoryTransaction.create({
+        data: {
+          organizationId: organization.id,
+          branchId: branchA.id,
+          inventoryItemId: item.id,
+          type: 'ADJUSTMENT',
+          quantityDelta: args.initialQuantity,
+          quantityAfter: args.initialQuantity,
+          referenceType: 'InventoryItem',
+          referenceId: item.id,
+          note: 'Initial stock balance',
+          recordedByUserId: managerUser.id,
+        },
+      });
+    }
+    return item;
+  }
+
+  const chickenStock = await seedInventoryItem({ idSuffix: 'chicken', ingredientId: chickenIngredient.id, initialQuantity: '25', reorderPoint: '10', criticalPoint: '5' });
+  const riceStock = await seedInventoryItem({ idSuffix: 'rice', ingredientId: riceIngredient.id, initialQuantity: '50', reorderPoint: '15', criticalPoint: '5' });
+  const sauceStock = await seedInventoryItem({ idSuffix: 'sauce', ingredientId: sauceIngredient.id, initialQuantity: '8', reorderPoint: '3', criticalPoint: '1' });
+  await seedInventoryItem({ idSuffix: 'cup', ingredientId: cupIngredient.id, initialQuantity: '40', reorderPoint: '100', criticalPoint: '30' });
+  console.log('  seeded 4 stock lines at branch A (Disposable Cup intentionally below its reorder point — LOW)');
+
+  // A supplier and one fully-received purchase order for Chicken — proves
+  // the PURCHASE transaction type and the "last purchase cost wins" cost
+  // update, per InventoryService.receivePurchaseOrderItems.
+  const supplier = await prisma.supplier.upsert({
+    where: { organizationId_name: { organizationId: organization.id, name: '[DEMO] Manila Fresh Poultry & Produce' } },
+    update: {},
+    create: {
+      organizationId: organization.id,
+      name: '[DEMO] Manila Fresh Poultry & Produce',
+      contactName: 'Rico Santos',
+      email: 'orders@manilafresh.example',
+      phone: '+63 917 800 4000',
+    },
+  });
+  const chickenPoId = `${organization.id}-po-chicken-1`;
+  const chickenPoExists = await prisma.purchaseOrder.findUnique({ where: { id: chickenPoId } });
+  if (!chickenPoExists) {
+    // 10kg @ ₱190.00/kg = 1900.00.
+    const po = await prisma.purchaseOrder.create({
+      data: {
+        id: chickenPoId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        supplierId: supplier.id,
+        status: 'RECEIVED',
+        total: '1900.00',
+        submittedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+        receivedAt: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000),
+        createdByUserId: managerUser.id,
+        items: {
+          create: [
+            {
+              ingredientId: chickenIngredient.id,
+              unitId: kilogram.id,
+              quantityOrdered: '10',
+              quantityReceived: '10',
+              unitCost: '190.00',
+              lineTotal: '1900.00',
+            },
+          ],
+        },
+      },
+      include: { items: true },
+    });
+    const poItem = po.items[0]!;
+    // Chicken was at 25kg from the initial adjustment above; +10kg = 35kg.
+    await prisma.inventoryTransaction.create({
+      data: {
+        organizationId: organization.id,
+        branchId: branchA.id,
+        inventoryItemId: chickenStock.id,
+        type: 'PURCHASE',
+        quantityDelta: '10',
+        quantityAfter: '35',
+        unitCostAtTime: '190.00',
+        referenceType: 'PurchaseOrder',
+        referenceId: po.id,
+        note: `Received against PO ${po.id}`,
+        recordedByUserId: managerUser.id,
+      },
+    });
+    await prisma.inventoryItem.update({ where: { id: chickenStock.id }, data: { quantityOnHand: '35' } });
+    // Last purchase cost wins — bumps Chicken's costPerUnit from the
+    // 180.00 placeholder to this receipt's real 190.00.
+    await prisma.ingredient.update({ where: { id: chickenIngredient.id }, data: { costPerUnit: '190.00' } });
+    void poItem;
+  }
+  console.log('  seeded 1 supplier + 1 received purchase order (10kg Chicken @ ₱190.00/kg, ₱1,900.00 total)');
+
+  // A waste record — 1L of Inasal Marinade spilled during prep.
+  const sauceWasteId = `${organization.id}-waste-sauce-1`;
+  const sauceWasteExists = await prisma.wasteRecord.findUnique({ where: { id: sauceWasteId } });
+  if (!sauceWasteExists) {
+    await prisma.wasteRecord.create({
+      data: {
+        id: sauceWasteId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        inventoryItemId: sauceStock.id,
+        quantity: '1',
+        reason: '[DEMO] Spilled during dinner-service prep',
+        recordedByUserId: managerUser.id,
+      },
+    });
+    await prisma.inventoryTransaction.create({
+      data: {
+        organizationId: organization.id,
+        branchId: branchA.id,
+        inventoryItemId: sauceStock.id,
+        type: 'WASTE',
+        quantityDelta: '-1',
+        quantityAfter: '7',
+        unitCostAtTime: '120.00',
+        referenceType: 'WasteRecord',
+        referenceId: sauceWasteId,
+        note: '[DEMO] Spilled during dinner-service prep',
+        recordedByUserId: managerUser.id,
+      },
+    });
+    await prisma.inventoryItem.update({ where: { id: sauceStock.id }, data: { quantityOnHand: '7' } });
+  }
+  console.log('  seeded 1 waste record (1L Inasal Marinade spilled — ₱120.00 waste cost)');
+
+  // A completed stock count — Rice was expected at 50kg (its initial
+  // balance) but the physical count found 49.5kg, so a COUNT_CORRECTION
+  // transaction brings the ledger to match reality.
+  const riceCountId = `${organization.id}-stockcount-1`;
+  const riceCountExists = await prisma.stockCount.findUnique({ where: { id: riceCountId } });
+  if (!riceCountExists) {
+    await prisma.stockCount.create({
+      data: {
+        id: riceCountId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        status: 'COMPLETED',
+        recordedByUserId: managerUser.id,
+        completedAt: now,
+        items: {
+          create: [{ inventoryItemId: riceStock.id, expectedQuantity: '50', countedQuantity: '49.5' }],
+        },
+      },
+    });
+    await prisma.inventoryTransaction.create({
+      data: {
+        organizationId: organization.id,
+        branchId: branchA.id,
+        inventoryItemId: riceStock.id,
+        type: 'COUNT_CORRECTION',
+        quantityDelta: '-0.5',
+        quantityAfter: '49.5',
+        referenceType: 'StockCount',
+        referenceId: riceCountId,
+        note: '[DEMO] Stock count correction (counted 49.5)',
+        recordedByUserId: managerUser.id,
+      },
+    });
+    await prisma.inventoryItem.update({ where: { id: riceStock.id }, data: { quantityOnHand: '49.5' } });
+  }
+  console.log('  seeded 1 completed stock count (Rice: expected 50kg, counted 49.5kg — COUNT_CORRECTION)');
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
