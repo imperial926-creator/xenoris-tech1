@@ -1573,6 +1573,310 @@ async function main() {
   }
   console.log('  seeded 1 completed stock count (Rice: expected 50kg, counted 49.5kg — COUNT_CORRECTION)');
 
+  // ===========================================================================
+  // Phase 10 — Accounting
+  // ===========================================================================
+  // Every organization created via AuthService.register gets its chart of
+  // accounts from AccountingService.ensureChartOfAccounts automatically —
+  // but the demo org here is provisioned by a raw upsert above, not that
+  // code path (this whole script deliberately never imports service
+  // classes, since they carry a `server-only` import that only resolves
+  // correctly inside the Next.js server runtime — see the file header).
+  // So, mirroring ensureChartOfAccounts' own idempotency check, this block
+  // seeds the same seeded list by hand and must stay in sync with
+  // AccountingService.ts's DEFAULT_CHART_OF_ACCOUNTS.
+  //
+  // What follows is real ledger data, not a retroactive rewrite of every
+  // order/reservation/catering/inventory row already seeded above: since
+  // this script creates those via raw prisma calls (bypassing
+  // OrderService/ReservationService/CateringService/InventoryService
+  // entirely, the same reason Phase 9's recipe consumption had to be
+  // hand-authored rather than derived from OrderService.updateStatus), the
+  // automatic revenue/COGS/deposit postings those services trigger in the
+  // real app never fired for this seeded history. Rather than
+  // hand-deriving 20+ journal entries that risk drifting from the real
+  // wiring logic, this section seeds a small, clearly-labeled set of
+  // standalone accounting events instead: an owner capital contribution
+  // and a pending petty-cash entry (the manual/DRAFT->POSTED path), plus
+  // vendors, expense categories, and one approved + one pending expense
+  // (the automatic-posting-on-approval path) — enough to exercise every
+  // UI section and prove the trial balance still balances.
+  const accountantUser = await prisma.user.findFirstOrThrow({
+    where: { organizationId: organization.id, email: 'accountant@restaurant-platform.local' },
+  });
+
+  const CHART_OF_ACCOUNTS: Array<{ code: string; name: string; type: string; normalBalance: string }> = [
+    { code: '1000', name: 'Cash', type: 'ASSET', normalBalance: 'DEBIT' },
+    { code: '1010', name: 'Bank', type: 'ASSET', normalBalance: 'DEBIT' },
+    { code: '1100', name: 'Accounts Receivable', type: 'ASSET', normalBalance: 'DEBIT' },
+    { code: '1200', name: 'Inventory', type: 'ASSET', normalBalance: 'DEBIT' },
+    { code: '1300', name: 'Equipment', type: 'ASSET', normalBalance: 'DEBIT' },
+    { code: '2000', name: 'Accounts Payable', type: 'LIABILITY', normalBalance: 'CREDIT' },
+    { code: '2100', name: 'Customer Deposits', type: 'LIABILITY', normalBalance: 'CREDIT' },
+    { code: '2200', name: 'Taxes Payable', type: 'LIABILITY', normalBalance: 'CREDIT' },
+    { code: '2300', name: 'Loans', type: 'LIABILITY', normalBalance: 'CREDIT' },
+    { code: '3000', name: "Owner's Equity", type: 'EQUITY', normalBalance: 'CREDIT' },
+    { code: '3100', name: 'Retained Earnings', type: 'EQUITY', normalBalance: 'CREDIT' },
+    { code: '4000', name: 'Dine-in Revenue', type: 'REVENUE', normalBalance: 'CREDIT' },
+    { code: '4010', name: 'Take-out Revenue', type: 'REVENUE', normalBalance: 'CREDIT' },
+    { code: '4020', name: 'Delivery Revenue', type: 'REVENUE', normalBalance: 'CREDIT' },
+    { code: '4030', name: 'Catering Revenue', type: 'REVENUE', normalBalance: 'CREDIT' },
+    { code: '4090', name: 'Other Revenue', type: 'REVENUE', normalBalance: 'CREDIT' },
+    { code: '5000', name: 'Food Cost', type: 'COGS', normalBalance: 'DEBIT' },
+    { code: '5010', name: 'Beverage Cost', type: 'COGS', normalBalance: 'DEBIT' },
+    { code: '5020', name: 'Packaging', type: 'COGS', normalBalance: 'DEBIT' },
+    { code: '5030', name: 'Catering Cost', type: 'COGS', normalBalance: 'DEBIT' },
+    { code: '5040', name: 'Delivery Cost', type: 'COGS', normalBalance: 'DEBIT' },
+    { code: '6000', name: 'Payroll', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6010', name: 'Rent', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6020', name: 'Utilities', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6030', name: 'Marketing', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6040', name: 'Insurance', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6050', name: 'Repairs', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6060', name: 'Transportation', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6070', name: 'Software', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6080', name: 'Waste', type: 'EXPENSE', normalBalance: 'DEBIT' },
+    { code: '6090', name: 'Other Expenses', type: 'EXPENSE', normalBalance: 'DEBIT' },
+  ];
+  const existingAccount = await prisma.chartOfAccount.findFirst({ where: { organizationId: organization.id } });
+  if (!existingAccount) {
+    await prisma.chartOfAccount.createMany({
+      data: CHART_OF_ACCOUNTS.map((a) => ({ organizationId: organization.id, ...a })),
+    });
+  }
+  // Explicit generic + populate-by-loop (not `new Map(rows.map(...))`) —
+  // same pattern as itemByName above; inferring the Map's value type
+  // straight from a `.map()` callback collapses to `{}` under this
+  // project's noUncheckedIndexedAccess + strict settings once Prisma's
+  // generated types are in the mix.
+  const accountRows = await prisma.chartOfAccount.findMany({ where: { organizationId: organization.id } });
+  const accountByName = new Map<string, (typeof accountRows)[number]>();
+  for (const a of accountRows) accountByName.set(a.name, a);
+  console.log(`  seeded chart of accounts (${accountByName.size} accounts)`);
+
+  // The calendar-month period covering "now" — lazily created the same way
+  // AccountingService.resolvePeriodForDate does, since every entry below
+  // needs one.
+  const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  const period = await prisma.accountingPeriod.upsert({
+    where: { organizationId_startDate: { organizationId: organization.id, startDate: periodStart } },
+    update: {},
+    create: { organizationId: organization.id, startDate: periodStart, endDate: periodEnd },
+  });
+
+  // Manual journal entry #1 — owner's initial capital contribution,
+  // POSTED. Demonstrates the accountant-authored (not automatic) entry
+  // path — see AccountingService.createJournalEntry/postJournalEntry.
+  const capitalEntryId = `${organization.id}-je-owner-capital`;
+  const capitalEntryExists = await prisma.journalEntry.findUnique({ where: { id: capitalEntryId } });
+  if (!capitalEntryExists) {
+    const bank = accountByName.get('Bank')!;
+    const ownersEquity = accountByName.get("Owner's Equity")!;
+    await prisma.journalEntry.create({
+      data: {
+        id: capitalEntryId,
+        organizationId: organization.id,
+        periodId: period.id,
+        entryDate: periodStart,
+        description: "[DEMO] Owner's initial capital contribution",
+        status: 'POSTED',
+        postedAt: periodStart,
+        postedByUserId: accountantUser.id,
+        createdByUserId: accountantUser.id,
+        lines: {
+          create: [
+            { accountId: bank.id, debit: '500000.00', credit: '0', description: 'Initial capitalization' },
+            { accountId: ownersEquity.id, debit: '0', credit: '500000.00', description: 'Initial capitalization' },
+          ],
+        },
+      },
+    });
+  }
+  console.log("  seeded 1 posted manual journal entry (owner's initial capital — ₱500,000.00)");
+
+  // Manual journal entry #2 — a petty cash top-up still awaiting review,
+  // left DRAFT on purpose so the dashboard's Post/Reverse actions have
+  // something to demonstrate against.
+  const pettyCashEntryId = `${organization.id}-je-petty-cash`;
+  const pettyCashEntryExists = await prisma.journalEntry.findUnique({ where: { id: pettyCashEntryId } });
+  if (!pettyCashEntryExists) {
+    const cash = accountByName.get('Cash')!;
+    const bank = accountByName.get('Bank')!;
+    await prisma.journalEntry.create({
+      data: {
+        id: pettyCashEntryId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        periodId: period.id,
+        entryDate: now,
+        description: '[DEMO] Petty cash top-up — awaiting accountant review',
+        status: 'DRAFT',
+        createdByUserId: accountantUser.id,
+        lines: {
+          create: [
+            { accountId: cash.id, debit: '5000.00', credit: '0' },
+            { accountId: bank.id, debit: '0', credit: '5000.00' },
+          ],
+        },
+      },
+    });
+  }
+  console.log('  seeded 1 draft manual journal entry (₱5,000.00 petty cash top-up, awaiting posting)');
+
+  // Vendors
+  const vendorMeralcoId = `${organization.id}-vendor-meralco`;
+  const vendorMeralco = await prisma.vendor.upsert({
+    where: { id: vendorMeralcoId },
+    update: {},
+    create: {
+      id: vendorMeralcoId, organizationId: organization.id,
+      name: '[DEMO] Meralco', contactName: 'Billing Department', phone: '16211',
+    },
+  });
+  const vendorLandlordId = `${organization.id}-vendor-landlord`;
+  const vendorLandlord = await prisma.vendor.upsert({
+    where: { id: vendorLandlordId },
+    update: {},
+    create: {
+      id: vendorLandlordId, organizationId: organization.id,
+      name: '[DEMO] Ayala Land Premier', contactName: 'Leasing Office', email: 'leasing@example.com',
+    },
+  });
+  console.log('  seeded 2 vendors');
+
+  // Expense categories — Rent and Utilities both have a default account
+  // configured (so they can be approved); Marketing deliberately does not,
+  // to demonstrate AccountingService.approveExpense's refusal to guess one
+  // (see the dashboard's "no default account" hint).
+  const rentAccount = accountByName.get('Rent')!;
+  const utilitiesAccount = accountByName.get('Utilities')!;
+  const categoryRentId = `${organization.id}-expcat-rent`;
+  const categoryRent = await prisma.expenseCategory.upsert({
+    where: { id: categoryRentId },
+    update: {},
+    create: { id: categoryRentId, organizationId: organization.id, name: 'Rent', defaultAccountId: rentAccount.id },
+  });
+  const categoryUtilitiesId = `${organization.id}-expcat-utilities`;
+  const categoryUtilities = await prisma.expenseCategory.upsert({
+    where: { id: categoryUtilitiesId },
+    update: {},
+    create: { id: categoryUtilitiesId, organizationId: organization.id, name: 'Utilities', defaultAccountId: utilitiesAccount.id },
+  });
+  const categoryMarketingId = `${organization.id}-expcat-marketing`;
+  await prisma.expenseCategory.upsert({
+    where: { id: categoryMarketingId },
+    update: {},
+    create: { id: categoryMarketingId, organizationId: organization.id, name: 'Marketing' },
+  });
+  console.log('  seeded 3 expense categories (Rent, Utilities — with default accounts; Marketing — without one, on purpose)');
+
+  // Expense #1 — Rent, APPROVED. Posted by hand here (Debit Rent / Credit
+  // Bank, plus the FinancialTransaction idempotency row) exactly matching
+  // what AccountingService.approveExpense would produce for the same
+  // input, since this script cannot call the service directly.
+  const rentExpenseId = `${organization.id}-expense-rent`;
+  const rentExpenseExists = await prisma.expense.findUnique({ where: { id: rentExpenseId } });
+  if (!rentExpenseExists) {
+    const bank = accountByName.get('Bank')!;
+    const rentJournalEntryId = `${organization.id}-je-rent-expense`;
+    await prisma.journalEntry.create({
+      data: {
+        id: rentJournalEntryId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        periodId: period.id,
+        entryDate: now,
+        description: '[DEMO] Expense — Rent ([DEMO] Ayala Land Premier)',
+        referenceType: 'Expense',
+        referenceId: rentExpenseId,
+        status: 'POSTED',
+        postedAt: now,
+        postedByUserId: accountantUser.id,
+        createdByUserId: accountantUser.id,
+        lines: {
+          create: [
+            { accountId: rentAccount.id, debit: '45000.00', credit: '0' },
+            { accountId: bank.id, debit: '0', credit: '45000.00' },
+          ],
+        },
+      },
+    });
+    await prisma.financialTransaction.create({
+      data: {
+        organizationId: organization.id,
+        branchId: branchA.id,
+        type: 'EXPENSE_POSTED',
+        referenceType: 'Expense',
+        referenceId: rentExpenseId,
+        journalEntryId: rentJournalEntryId,
+      },
+    });
+    await prisma.expense.create({
+      data: {
+        id: rentExpenseId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        vendorId: vendorLandlord.id,
+        categoryId: categoryRent.id,
+        amount: '45000.00',
+        expenseDate: now,
+        paymentMethod: 'BANK_TRANSFER',
+        notes: '[DEMO] Monthly rent — Branch A',
+        approvalStatus: 'APPROVED',
+        recordedByUserId: accountantUser.id,
+        approvedByUserId: accountantUser.id,
+        journalEntryId: rentJournalEntryId,
+      },
+    });
+  }
+  console.log('  seeded 1 approved expense (Rent — ₱45,000.00, posted: Debit Rent / Credit Bank)');
+
+  // Expense #2 — Utilities, still PENDING (not yet posted to the ledger).
+  const utilitiesExpenseId = `${organization.id}-expense-utilities`;
+  const utilitiesExpenseExists = await prisma.expense.findUnique({ where: { id: utilitiesExpenseId } });
+  if (!utilitiesExpenseExists) {
+    await prisma.expense.create({
+      data: {
+        id: utilitiesExpenseId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        vendorId: vendorMeralco.id,
+        categoryId: categoryUtilities.id,
+        amount: '8500.00',
+        expenseDate: now,
+        paymentMethod: 'GCASH',
+        notes: '[DEMO] Electricity — Branch A',
+        approvalStatus: 'PENDING',
+        recordedByUserId: managerUser.id,
+      },
+    });
+  }
+  console.log('  seeded 1 pending expense (Utilities — ₱8,500.00, awaiting approval)');
+
+  // Expense #3 — Marketing, PENDING and vendorless, in the one category
+  // with no default account — approving it in the UI should fail until an
+  // accountant configures one, exactly like AccountingService.approveExpense.
+  const marketingExpenseId = `${organization.id}-expense-marketing`;
+  const marketingExpenseExists = await prisma.expense.findUnique({ where: { id: marketingExpenseId } });
+  if (!marketingExpenseExists) {
+    await prisma.expense.create({
+      data: {
+        id: marketingExpenseId,
+        organizationId: organization.id,
+        branchId: branchA.id,
+        categoryId: categoryMarketingId,
+        amount: '3200.00',
+        expenseDate: now,
+        paymentMethod: 'CARD',
+        notes: '[DEMO] Boosted social media posts',
+        approvalStatus: 'PENDING',
+        recordedByUserId: managerUser.id,
+      },
+    });
+  }
+  console.log('  seeded 1 pending expense (Marketing — ₱3,200.00, category has no default account yet)');
+
   console.log('\nDemo login (organization email + user email + password):');
   console.log(`  Organization email: ${DEMO_ORG_EMAIL}`);
   console.log(`  Any role email:     owner@restaurant-platform.local (or staff@, manager@, ...)`);
