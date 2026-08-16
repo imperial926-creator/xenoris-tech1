@@ -7,6 +7,25 @@ import { prisma } from '@/lib/db/prisma';
  */
 export async function resetDatabase() {
   await prisma.auditLog.deleteMany();
+  // Phase 10 — accounting. Deleted first (before menuItem/branch/
+  // organization/user further down): expenseAttachment references expense;
+  // expense references vendor/expenseCategory/journalEntry (all SET NULL or
+  // RESTRICT-free from this direction) plus organization/branch/user
+  // directly; financialTransaction and journalEntryLine both reference
+  // journalEntry (Cascade); journalEntry itself references accountingPeriod
+  // (RESTRICT) and chartOfAccount indirectly through its lines (RESTRICT via
+  // journalEntryLine.accountId) — so lines/entries go before periods/
+  // accounts, exactly mirroring Phase 9's inventoryTransaction-before-unit
+  // ordering for the same RESTRICT reason.
+  await prisma.expenseAttachment.deleteMany();
+  await prisma.expense.deleteMany();
+  await prisma.financialTransaction.deleteMany();
+  await prisma.journalEntryLine.deleteMany();
+  await prisma.journalEntry.deleteMany();
+  await prisma.accountingPeriod.deleteMany();
+  await prisma.expenseCategory.deleteMany();
+  await prisma.vendor.deleteMany();
+  await prisma.chartOfAccount.deleteMany();
   // Phase 9 — inventory. Deleted first (before menuItem/branch/organization/
   // user further down): wasteRecord/stockCountItem/inventoryTransaction all
   // reference inventoryItem, so those go before it; purchaseOrderItem
