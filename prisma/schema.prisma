@@ -58,6 +58,13 @@ model Organization {
   purchaseOrders      PurchaseOrder[]
   stockCounts         StockCount[]
   wasteRecords        WasteRecord[]
+  chartOfAccounts       ChartOfAccount[]
+  accountingPeriods     AccountingPeriod[]
+  journalEntries        JournalEntry[]
+  financialTransactions FinancialTransaction[]
+  expenseCategories     ExpenseCategory[]
+  vendors               Vendor[]
+  expenses              Expense[]
 
   // Phase 8 — CRM. Per-organization overrides for the RFM segmentation
   // thresholds in lib/crm/rfm.ts (recency/frequency/monetary cutoffs).
@@ -113,6 +120,9 @@ model Branch {
   purchaseOrders        PurchaseOrder[]
   stockCounts           StockCount[]
   wasteRecords          WasteRecord[]
+  journalEntries        JournalEntry[]
+  financialTransactions FinancialTransaction[]
+  expenses              Expense[]
 
   @@index([organizationId])
   @@map("branches")
@@ -176,6 +186,17 @@ model User {
   purchaseOrdersCreated         PurchaseOrder[]
   stockCountsRecorded           StockCount[]
   wasteRecordsRecorded          WasteRecord[]
+
+  // Phase 10 — Accounting. Same "who actioned this" attribution pattern —
+  // journal entry creation and posting are tracked as separate actors/
+  // moments (a drafted manual entry may be posted later, by someone else),
+  // per master spec §45's "create" vs. "post" being distinct responsibilities.
+  accountingPeriodsClosed    AccountingPeriod[]
+  journalEntriesCreated      JournalEntry[]       @relation("JournalEntryCreatedBy")
+  journalEntriesPosted       JournalEntry[]       @relation("JournalEntryPostedBy")
+  expensesRecorded           Expense[]            @relation("ExpenseRecordedBy")
+  expensesApproved           Expense[]            @relation("ExpenseApprovedBy")
+  expenseAttachmentsUploaded ExpenseAttachment[]
 
   // Email is unique per organization, not globally — the same person may be a
   // customer of multiple independent restaurant organizations on the platform.
@@ -2048,4 +2069,382 @@ model WasteRecord {
   @@index([organizationId])
   @@index([branchId])
   @@map("waste_records")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10 — Accounting
+// ---------------------------------------------------------------------------
+//
+// Master spec §27 ("implement a proper double-entry accounting architecture
+// ... each journal entry must balance ... do not allow a posted journal
+// entry to be directly edited, use reversal/correction entries"), §28 (seed
+// a configurable chart of accounts), §29/§37 (a financial transaction
+// engine mapping real business events — sales, deposits, purchases,
+// consumption, waste, expenses — to journal entries, deterministically, "AI
+// must never directly invent accounting entries"), §23 (customer deposits
+// are a liability until earned, not automatic revenue), §30 (expense
+// tracking), §45 (a dedicated AccountingService), §49 (automated proof that
+// SUM(DEBITS) = SUM(CREDITS)). Six design decisions:
+//
+// 1. `ChartOfAccount` is organization-scoped and seeded per-organization at
+//    registration (`AuthService.register`, mirroring how Phase 1 seeds
+//    default roles) rather than being a single global chart every tenant
+//    shares — §28's "seed an initial configurable chart" plus §37's "all
+//    rules must be configurable" both imply per-tenant control (a
+//    restaurant might rename "Marketing" to something else, add a branch-
+//    specific expense account, etc.), which a shared global chart can't
+//    support. `AccountingService.ensureChartOfAccounts` is idempotent
+//    (checks before creating) so it is also safely callable for an
+//    organization that existed before this phase shipped — exactly the
+//    demo seed org's situation, since it was created by Phase 1's seed
+//    script long before `ChartOfAccount` existed.
+// 2. The audit-trail discipline Phase 9 established for `InventoryItem.
+//    quantityOnHand` — one code path writes it, always paired with a ledger
+//    row — repeats here, one level up: a `JournalEntry`'s lines are never
+//    updated once `status` moves to `POSTED` (application-enforced; there
+//    is no "update journal entry lines" service method at all once posted,
+//    the same "the guarantee is structural, not conventional" reasoning).
+//    Correcting a posted entry means `AccountingService.reverseJournalEntry`
+//    — a brand-new entry with every line's debit/credit swapped, referencing
+//    the original via `reversalOfEntryId`. The original's own `status`
+//    field does flip to `REVERSED` (a lifecycle marker, the same kind of
+//    post-creation status change every other model in this codebase makes
+//    freely — Order/Invoice/PurchaseOrder/etc.) but its `JournalEntryLine`
+//    rows, the actual accounting content, are never touched.
+// 3. `FinancialTransaction` is the idempotency/link layer master spec §47
+//    calls for explicitly ("implement idempotency for ... financial
+//    posting ... a repeated request must not accidentally create duplicate
+//    ... journal entries"). Every automatic posting (order revenue, a
+//    deposit, a PO receipt, waste, an approved expense) creates exactly one
+//    `FinancialTransaction` alongside its `JournalEntry`, keyed by
+//    `@@unique([referenceType, referenceId, type])` — a retried
+//    "complete this order" call cannot double-post its revenue entry, a
+//    second call simply finds the existing link and does nothing further.
+//    This is also the honest place to note a real scope boundary: the
+//    order/reservation/catering/inventory transitions that trigger these
+//    postings are themselves already guarded against reentrancy by their
+//    own state machines (e.g. `Order.status` can only leave `COMPLETED` to
+//    nowhere — see `OrderService`'s `ALLOWED_TRANSITIONS`), so the unique
+//    constraint here is defense-in-depth for a path that is not actually
+//    reachable through this build's own API today, not a currently-
+//    exploitable gap being left open.
+// 4. Deposits are never posted straight to a revenue account — §23's
+//    explicit rule. A reservation deposit or a catering `DEPOSIT` payment
+//    posts Debit Cash / Credit "Customer Deposits" (a liability). Revenue
+//    is recognized — Debit Customer Deposits / Credit the relevant revenue
+//    account — only when the service is actually rendered: a `Reservation`
+//    reaching `COMPLETED` (with a `PAID` deposit), or a catering
+//    `BALANCE` payment being recorded (treated as "the event happened, the
+//    customer settled the account, the full event total is now earned" —
+//    simpler and more robust than trying to key revenue recognition off
+//    `CateringEvent.status` and payment amounts independently, at the cost
+//    of a documented simplification: revenue is recognized at final-payment
+//    time, not exactly at event-completion time, if those two moments ever
+//    diverge in a future workflow change). Both policies are flagged in
+//    `CLAUDE.md` as exactly the kind of local accounting-policy decision
+//    §68 asks to have reviewed by a real accountant, not silently assumed
+//    correct.
+// 5. `AccountingPeriod` is a plain calendar-month bucket, auto-created on
+//    demand (`AccountingService.ensureOpenPeriodForDate`) the first time an
+//    entry needs to post into a given month, rather than requiring an
+//    accountant to pre-create periods by hand before any transaction can
+//    happen. Closing a period (`closePeriod`) is a real, enforced gate: it
+//    refuses if any `DRAFT` journal entry is dated inside that period
+//    (nothing can be silently left half-posted when the books close), and
+//    once `CLOSED`, no new or reversing entry may be dated inside it — a
+//    correction to a closed period posts as a new entry in the current open
+//    period instead, standard closed-period accounting practice.
+// 6. `Vendor` (this phase, §30) and `Supplier` (Phase 9, §14) are kept as
+//    two separate tables despite being structurally almost identical —
+//    deliberately, not from a missed dedup opportunity. A `Supplier` sells
+//    ingredients and is referenced by `PurchaseOrder`, which posts to
+//    `Inventory`/`Accounts Payable`; a `Vendor` is billed for a general
+//    business expense (rent, software, a marketing platform) and is
+//    referenced by `Expense`, which posts to whatever account its
+//    `ExpenseCategory` maps to. The master spec lists them as separate
+//    concepts in separate sections (§14 vs. §30) with separate purposes,
+//    and conflating them would blur "who do we buy ingredients from" with
+//    "who do we pay for overhead" — a real distinction a restaurant owner
+//    would expect kept apart, even though today's fields happen to match.
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  COGS
+  EXPENSE
+}
+
+enum DebitCredit {
+  DEBIT
+  CREDIT
+}
+
+model ChartOfAccount {
+  id             String      @id @default(cuid())
+  organizationId String
+  // Simple numeric-prefix scheme (1xxx assets, 2xxx liabilities, 3xxx
+  // equity, 4xxx revenue, 5xxx COGS, 6xxx expenses) — not mandated by the
+  // master spec, but a conventional, sortable code every seeded account
+  // gets so the chart reads in a sensible order.
+  code           String
+  name           String
+  type           AccountType
+  // Which side increases this account's balance — derivable from `type`
+  // (ASSET/COGS/EXPENSE = DEBIT, LIABILITY/EQUITY/REVENUE = CREDIT) but
+  // stored explicitly so balance/trial-balance queries never need a
+  // hardcoded type→side switch statement scattered through the service.
+  normalBalance  DebitCredit
+  description    String?
+  // Seeded default accounts (see AccountingService.ensureChartOfAccounts).
+  // Not a delete-protection flag at the DB level (RESTRICT on
+  // JournalEntryLine.accountId already prevents deleting any account with
+  // postings) — purely informational, so the UI can visually distinguish
+  // "part of the standard chart" from an org's own custom accounts.
+  isSystem       Boolean     @default(true)
+  active         Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lines              JournalEntryLine[]
+  expenseCategories  ExpenseCategory[]
+
+  @@unique([organizationId, code])
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("chart_of_accounts")
+}
+
+enum AccountingPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+model AccountingPeriod {
+  id             String                 @id @default(cuid())
+  organizationId String
+  // Calendar-month bucket — startDate is always the 1st, endDate the last
+  // instant of the month. See file header decision #5.
+  startDate      DateTime
+  endDate        DateTime
+  status         AccountingPeriodStatus @default(OPEN)
+  closedAt       DateTime?
+  closedByUserId String?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  closedBy       User?          @relation(fields: [closedByUserId], references: [id], onDelete: SetNull)
+  journalEntries JournalEntry[]
+
+  @@unique([organizationId, startDate])
+  @@index([organizationId])
+  @@map("accounting_periods")
+}
+
+enum JournalEntryStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+model JournalEntry {
+  id             String             @id @default(cuid())
+  organizationId String
+  // Nullable — most entries are branch-scoped (they come from a branch-
+  // scoped business event), but a manual org-level adjusting entry is a
+  // real case this build supports without forcing an arbitrary branch pick.
+  branchId       String?
+  periodId       String
+  entryDate      DateTime
+  description    String
+  // Loose link back to whatever business event produced this entry (an
+  // Order, a Reservation, a PurchaseOrder, a WasteRecord, an Expense) —
+  // same pattern as InventoryTransaction's referenceType/referenceId.
+  referenceType  String?
+  referenceId    String?
+  status         JournalEntryStatus @default(DRAFT)
+  // Set only on a reversal entry, pointing at the entry it reverses.
+  // @unique enforces "an entry may be reversed at most once" — you cannot
+  // reverse the same original twice.
+  reversalOfEntryId String?         @unique
+  postedAt          DateTime?
+  postedByUserId     String?
+  createdByUserId    String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  period       AccountingPeriod  @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  reversalOf   JournalEntry?     @relation("JournalEntryReversal", fields: [reversalOfEntryId], references: [id], onDelete: SetNull)
+  reversedBy   JournalEntry?     @relation("JournalEntryReversal")
+  postedBy     User?             @relation("JournalEntryPostedBy", fields: [postedByUserId], references: [id], onDelete: SetNull)
+  createdBy    User?             @relation("JournalEntryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lines        JournalEntryLine[]
+  financialTransaction FinancialTransaction?
+  expense      Expense?
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([periodId])
+  @@index([referenceType, referenceId])
+  @@map("journal_entries")
+}
+
+model JournalEntryLine {
+  id             String   @id @default(cuid())
+  journalEntryId String
+  accountId      String
+  // Exactly one of debit/credit is positive, the other is exactly 0 — a
+  // hand-written migration CHECK constraint enforces this at the database
+  // level (Prisma's schema DSL has no CHECK support, the same gap Phase 3/
+  // 4/8's CHECK constraints hit), backed by a matching Zod-layer bound.
+  debit          Decimal  @default(0) @db.Decimal(14, 2)
+  credit         Decimal  @default(0) @db.Decimal(14, 2)
+  description    String?
+
+  journalEntry JournalEntry   @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account      ChartOfAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([journalEntryId])
+  @@index([accountId])
+  @@map("journal_entry_lines")
+}
+
+enum FinancialTransactionType {
+  ORDER_REVENUE
+  ORDER_COGS
+  DEPOSIT_RECEIVED
+  DEPOSIT_REFUNDED
+  DEPOSIT_EARNED
+  INVENTORY_PURCHASE
+  INVENTORY_WASTE
+  EXPENSE_POSTED
+}
+
+model FinancialTransaction {
+  id             String                   @id @default(cuid())
+  organizationId String
+  branchId       String?
+  type           FinancialTransactionType
+  // What business event produced this posting — an Order, Reservation,
+  // CateringPayment, PurchaseOrder, WasteRecord, or Expense id.
+  referenceType  String
+  referenceId    String
+  journalEntryId String                   @unique
+  createdAt      DateTime                 @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+
+  // The idempotency guard — see file header decision #3.
+  @@unique([referenceType, referenceId, type])
+  @@index([organizationId])
+  @@map("financial_transactions")
+}
+
+model ExpenseCategory {
+  id               String   @id @default(cuid())
+  organizationId   String
+  name             String
+  // Which account an expense in this category posts to by default — see
+  // file header decision #6 (kept separate from the seeded chart's fixed
+  // account list so an org can add its own categories/accounts later).
+  defaultAccountId String?
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  defaultAccount ChartOfAccount? @relation(fields: [defaultAccountId], references: [id], onDelete: SetNull)
+  expenses       Expense[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("expense_categories")
+}
+
+model Vendor {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  contactName    String?
+  email          String?
+  phone          String?
+  address        String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expenses     Expense[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("vendors")
+}
+
+enum ExpenseApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Expense {
+  id             String                 @id @default(cuid())
+  organizationId String
+  branchId       String
+  vendorId       String?
+  categoryId     String
+  amount         Decimal                @db.Decimal(12, 2)
+  expenseDate    DateTime
+  // Reuses the existing OrderPaymentMethod enum — same "one enum, many
+  // tables" reasoning Phase 7's CateringPayment already established for
+  // OrderPaymentMethod/OrderPaymentStatus.
+  paymentMethod    OrderPaymentMethod
+  notes            String?
+  approvalStatus   ExpenseApprovalStatus @default(PENDING)
+  recordedByUserId String?
+  approvedByUserId String?
+  // Set only once APPROVED and posted — see AccountingService.approveExpense.
+  journalEntryId   String?               @unique
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  vendor       Vendor?             @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  category     ExpenseCategory     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  recordedBy   User?               @relation("ExpenseRecordedBy", fields: [recordedByUserId], references: [id], onDelete: SetNull)
+  approvedBy   User?               @relation("ExpenseApprovedBy", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  journalEntry JournalEntry?       @relation(fields: [journalEntryId], references: [id], onDelete: SetNull)
+  attachments  ExpenseAttachment[]
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([categoryId])
+  @@map("expenses")
+}
+
+model ExpenseAttachment {
+  id               String   @id @default(cuid())
+  expenseId        String
+  fileName         String
+  // Metadata-only, same honest stub as the rest of this build's unconfigured
+  // integrations (STORAGE_PROVIDER_KEY is unset per .env.example) — no real
+  // file upload/storage exists yet, this records that a receipt exists and
+  // where it would live once storage is configured.
+  fileUrl          String
+  uploadedByUserId String?
+  createdAt        DateTime @default(now())
+
+  expense    Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  uploadedBy User?   @relation(fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([expenseId])
+  @@map("expense_attachments")
 }
