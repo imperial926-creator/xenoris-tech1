@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
+import { AccountingService } from '@/services/accounting/AccountingService';
 import type {
   AvailabilityQueryInput,
   CreateReservationInput,
@@ -283,6 +284,18 @@ export class ReservationService {
         },
       });
 
+      // Phase 10 — Accounting. A reservation reaching COMPLETED with a
+      // deposit still sitting as a liability means that deposit is now
+      // earned revenue — see AccountingService.recordReservationDepositEarned
+      // and schema.prisma's Phase 10 decision #4.
+      if (input.status === 'COMPLETED' && reservation.depositStatus === 'PAID') {
+        await AccountingService.recordReservationDepositEarned(
+          tx, organizationId, branchId,
+          { id: reservation.id, depositAmount: reservation.depositAmount },
+          actorUserId,
+        );
+      }
+
       await writeAuditLog(tx, {
         organizationId,
         branchId,
@@ -304,8 +317,10 @@ export class ReservationService {
   /**
    * Manually records a deposit payment/refund. There is no payment gateway
    * yet (see docs/architecture.md § Risks) — this is staff attesting money
-   * changed hands outside the system (cash, bank transfer, etc.), not a
-   * real transaction record. Phase 4/10 will connect this to a real ledger.
+   * changed hands outside the system (cash, bank transfer, etc.). A
+   * PENDING->PAID transition posts Debit Cash / Credit Customer Deposits;
+   * a PAID->REFUNDED transition reverses it — see
+   * AccountingService.recordReservationDepositPaid/Refunded (Phase 10).
    */
   static async recordDeposit(
     organizationId: string,
@@ -326,6 +341,25 @@ export class ReservationService {
           depositNote: input.depositNote,
         },
       });
+
+      // Phase 10 — Accounting. Only fires on an actual state transition
+      // (not a no-op re-save of the same status), and only for the two
+      // transitions that mean something to the ledger — see
+      // schema.prisma's Phase 10 decision #4 on why deposits are never
+      // posted straight to revenue.
+      if (reservation.depositStatus !== 'PAID' && updated.depositStatus === 'PAID') {
+        await AccountingService.recordReservationDepositPaid(
+          tx, organizationId, branchId,
+          { id: updated.id, depositAmount: updated.depositAmount },
+          actorUserId,
+        );
+      } else if (reservation.depositStatus === 'PAID' && updated.depositStatus === 'REFUNDED') {
+        await AccountingService.recordReservationDepositRefunded(
+          tx, organizationId, branchId,
+          { id: updated.id, depositAmount: updated.depositAmount },
+          actorUserId,
+        );
+      }
 
       await writeAuditLog(tx, {
         organizationId,

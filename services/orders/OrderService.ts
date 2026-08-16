@@ -6,6 +6,7 @@ import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
 import { InventoryService } from '@/services/inventory/InventoryService';
+import { AccountingService } from '@/services/accounting/AccountingService';
 import type {
   CreateOrderInput,
   ListOrdersQueryInput,
@@ -309,12 +310,36 @@ export class OrderService {
       // see InventoryService.consumeForOrder for why it never blocks an
       // order from completing.
       if (input.status === 'COMPLETED') {
-        await InventoryService.consumeForOrder(
+        const cogsAmount = await InventoryService.consumeForOrder(
           tx,
           organizationId,
           branchId,
           orderId,
           order.items.map((item) => ({ menuItemId: item.menuItemId, quantity: item.quantity })),
+          actorUserId,
+        );
+
+        // Phase 10 — Accounting. Posts revenue (Cash/AR split by amount
+        // actually paid so far, per-order-type revenue account, tax to
+        // Taxes Payable) and COGS (using the exact consumption cost just
+        // computed above) as two independent journal entries. Unlike
+        // inventory consumption, this is NOT best-effort — see
+        // AccountingService's class-level note on why financial postings
+        // fail loudly rather than silently skipping.
+        await AccountingService.recordOrderRevenue(
+          tx,
+          organizationId,
+          branchId,
+          {
+            id: order.id,
+            type: order.type,
+            subtotal: order.subtotal,
+            discountTotal: order.discountTotal,
+            taxTotal: order.taxTotal,
+            deliveryFee: order.deliveryFee,
+            total: order.total,
+          },
+          cogsAmount,
           actorUserId,
         );
       }

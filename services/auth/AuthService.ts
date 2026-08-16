@@ -4,6 +4,7 @@ import { hashPassword, verifyPassword } from '@/lib/auth/password';
 import { createSessionToken, type SessionPayload } from '@/lib/auth/session';
 import { writeAuditLog } from '@/lib/audit/log';
 import { DEFAULT_ROLE_PERMISSIONS, ROLE_NAMES, PERMISSION_CATALOG } from '@/lib/auth/constants';
+import { AccountingService } from '@/services/accounting/AccountingService';
 import { ConflictError, NotFoundError } from '@/lib/utils/api-error';
 import type { LoginInput, RegisterInput } from '@/lib/validation/auth';
 
@@ -46,6 +47,15 @@ export class AuthService {
           timezone: input.timezone,
         },
       });
+
+      // Phase 10 — Accounting. Every organization gets the standard chart
+      // of accounts from day one, mirroring the role/permission seeding
+      // immediately below (same "provision everything a brand-new org
+      // needs, in the same transaction" discipline). Idempotent, so it is
+      // also safe to call standalone for organizations that predate this
+      // phase — see AccountingService.ensureChartOfAccounts and
+      // prisma/seed.ts's demo-org handling.
+      await AccountingService.ensureChartOfAccounts(tx, organization.id);
 
       // Ensure the global permission catalog exists (idempotent upsert — safe
       // to run on every registration, cheap after the first time).

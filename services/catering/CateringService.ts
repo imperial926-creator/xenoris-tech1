@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
+import { AccountingService } from '@/services/accounting/AccountingService';
 import type {
   CreateCateringPackageInput,
   UpdateCateringPackageInput,
@@ -577,6 +578,41 @@ export class CateringService {
           recordedByUserId: actorUserId,
         },
       });
+
+      // Phase 10 — Accounting. §23: deposits are a liability, never
+      // automatic revenue. A DEPOSIT payment posts Debit Cash / Credit
+      // Customer Deposits (or the reverse if recorded as a refund); a
+      // BALANCE payment is this build's revenue-recognition trigger for
+      // catering, recognizing the sum of actual payments received to date
+      // (this payment plus every prior COMPLETED deposit) rather than the
+      // quoted total — see schema.prisma's Phase 10 decision #4. A BALANCE
+      // payment recorded as REFUNDED is deliberately left unwired (see
+      // AccountingService.recordCateringDepositRefunded's doc comment).
+      if (input.type === 'DEPOSIT' && input.status === 'COMPLETED') {
+        await AccountingService.recordCateringDepositReceived(
+          tx, organizationId, branchId, { id: payment.id, amount: payment.amount }, actorUserId,
+        );
+      } else if (input.type === 'DEPOSIT' && input.status === 'REFUNDED') {
+        await AccountingService.recordCateringDepositRefunded(
+          tx, organizationId, branchId, { id: payment.id, amount: payment.amount }, actorUserId,
+        );
+      } else if (input.type === 'BALANCE' && input.status === 'COMPLETED') {
+        const depositAgg = await tx.cateringPayment.aggregate({
+          where: { eventId, type: 'DEPOSIT', status: 'COMPLETED' },
+          _sum: { amount: true },
+        });
+        await AccountingService.recordCateringBalanceSettled(
+          tx, organizationId, branchId,
+          {
+            eventId,
+            balancePaymentId: payment.id,
+            balanceAmount: payment.amount,
+            depositPaidToDate: depositAgg._sum.amount ?? new Prisma.Decimal(0),
+          },
+          actorUserId,
+        );
+      }
+
       await writeAuditLog(tx, {
         organizationId, branchId, userId: actorUserId,
         action: 'catering_event.payment_recorded', entityType: 'CateringEvent', entityId: eventId, newValue: payment,

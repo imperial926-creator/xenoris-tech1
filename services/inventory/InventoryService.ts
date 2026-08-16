@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { convertQuantity, assertSingleLevelChain, type UnitLike } from '@/lib/inventory/units';
+import { AccountingService } from '@/services/accounting/AccountingService';
 import type {
   CreateUnitInput,
   UpdateUnitInput,
@@ -387,6 +388,14 @@ export class InventoryService {
         referenceType: 'WasteRecord', referenceId: waste.id,
         note: input.reason, recordedByUserId: actorUserId,
       });
+      // Phase 10 — Accounting. Debit Waste / Credit Inventory, using the
+      // same cost the stock ledger just applied above. Each WasteRecord row
+      // is its own idempotency key (see AccountingService.recordInventoryWaste).
+      await AccountingService.recordInventoryWaste(
+        tx, organizationId, branchId,
+        { wasteRecordId: waste.id, cost: new Prisma.Decimal(input.quantity).times(item.ingredient.costPerUnit) },
+        actorUserId,
+      );
       await writeAuditLog(tx, {
         organizationId, branchId, userId: actorUserId,
         action: 'waste_record.create', entityType: 'WasteRecord', entityId: waste.id, newValue: waste,
@@ -700,6 +709,14 @@ export class InventoryService {
     }
 
     return prisma.$transaction(async (tx) => {
+      // Phase 10 — Accounting. Accumulated across every line received in
+      // THIS call, and anchored to the id of the first InventoryTransaction
+      // row this call creates — see AccountingService.recordInventoryPurchase
+      // for why the idempotency key is per-receiving-call, not per-PO (a PO
+      // can legitimately be received against multiple times).
+      let totalReceiptCost = new Prisma.Decimal(0);
+      let anchorTransactionId: string | undefined;
+
       for (const line of input.items) {
         const poItem = poItemById.get(line.purchaseOrderItemId)!;
         const ingredient = await tx.ingredient.findUniqueOrThrow({ where: { id: poItem.ingredientId }, include: { stockUnit: true } });
@@ -721,7 +738,7 @@ export class InventoryService {
           update: {},
         });
 
-        await this.applyTransaction(tx, {
+        const { transaction: purchaseTransaction } = await this.applyTransaction(tx, {
           organizationId, branchId, inventoryItemId: inventoryItem.id,
           type: 'PURCHASE', quantityDelta: convertedQty,
           unitCostAtTime: costPerStockUnit,
@@ -729,6 +746,8 @@ export class InventoryService {
           note: `Received against PO ${purchaseOrderId}`,
           recordedByUserId: actorUserId,
         });
+        totalReceiptCost = totalReceiptCost.plus(receiptCost);
+        if (!anchorTransactionId) anchorTransactionId = purchaseTransaction.id;
 
         // "Last purchase cost wins" — the ingredient's costPerUnit always
         // reflects the most recent purchase, driving future COGS/waste-cost
@@ -739,6 +758,14 @@ export class InventoryService {
           where: { id: poItem.id },
           data: { quantityReceived: { increment: receivedQty.toFixed(4) } },
         });
+      }
+
+      if (totalReceiptCost.gt(0) && anchorTransactionId) {
+        await AccountingService.recordInventoryPurchase(
+          tx, organizationId, branchId,
+          { purchaseOrderId, anchorTransactionId, totalCost: totalReceiptCost },
+          actorUserId,
+        );
       }
 
       const refreshedItems = await tx.purchaseOrderItem.findMany({ where: { purchaseOrderId } });
@@ -923,7 +950,14 @@ export class InventoryService {
     orderId: string,
     orderItems: Array<{ menuItemId: string; quantity: number }>,
     actorUserId: string,
-  ): Promise<void> {
+  ): Promise<Prisma.Decimal> {
+    // Phase 10 — Accounting. Accumulated as consumption is applied so
+    // OrderService.updateStatus can pass the exact figure straight into
+    // AccountingService.recordOrderRevenue without a second query inside
+    // the same open transaction (see getCogsForOrder below for the
+    // equivalent read-after-the-fact query, used where no open tx exists).
+    let cogs = new Prisma.Decimal(0);
+
     for (const orderItem of orderItems) {
       const recipe = await tx.recipe.findUnique({
         where: { menuItemId: orderItem.menuItemId },
@@ -954,8 +988,11 @@ export class InventoryService {
           referenceType: 'Order', referenceId: orderId,
           recordedByUserId: actorUserId,
         });
+        cogs = cogs.plus(convertedQty.times(recipeItem.ingredient.costPerUnit));
       }
     }
+
+    return cogs;
   }
 
   /** Sums the real ingredient cost of every SALE_CONSUMPTION row tied to an order — this phase's slice of §37's "ingredient consumption -> COGS increases." */
