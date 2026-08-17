@@ -89,14 +89,18 @@ export class UnconfiguredAIProvider implements AIProvider {
 /**
  * Resolves the configured AI provider from environment, following the same
  * "provider-agnostic factory" shape as a real payment/notification provider
- * factory would use. No concrete provider is registered in this codebase
- * yet (see file header) — AI_PROVIDER is read defensively so wiring one in
- * later is a matter of adding a branch here, not changing any call site.
+ * factory would use. Reads `AI_PROVIDER_KEY` — the variable name
+ * `.env.example`'s pre-existing "AI business intelligence (unconfigured —
+ * Phase 13)" section already reserved back when that file was first
+ * written, before this phase existed. No concrete provider is registered
+ * in this codebase yet (see file header) — the key is read defensively so
+ * wiring one in later is a matter of adding a branch here, not changing
+ * any call site.
  */
 export function getAIProvider(): AIProvider {
-  const configured = process.env.AI_PROVIDER;
+  const configured = process.env.AI_PROVIDER_KEY;
   if (!configured) return new UnconfiguredAIProvider();
-  // No branch matches yet — every value of AI_PROVIDER currently falls
+  // No branch matches yet — every value of AI_PROVIDER_KEY currently falls
   // back to the unconfigured stub until a real provider is implemented and
   // registered here.
   return new UnconfiguredAIProvider();

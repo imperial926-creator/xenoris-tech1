@@ -633,6 +633,21 @@ reads `Order`/`CateringPayment`; `getProfitDashboard` reuses Phase 11's `Reporti
 rationale, the trend-bucketing/reconciliation design, and the catering revenue-recognition
 timing convention this phase relies on.
 
+## Phase 13 Schema
+
+One nullable column, no new tables — Phase 13 (AI) is pure read/aggregation over data Phases 9-12
+already produce, via `lib/ai/tools.ts` (read-only wrappers around `AnalyticsService`) and
+`services/ai/InsightService.ts` (the rule engine consuming them).
+
+### Organization (additions)
+
+`aiSettings (Json?, nullable)` — per-organization overrides for the insight-generation thresholds in
+`lib/ai/thresholds.ts` (how big a swing in sales/margin/expense/waste/repeat-rate counts as worth
+surfacing), merged over `DEFAULT_AI_INSIGHT_THRESHOLDS` via `resolveAiInsightThresholds`. Same
+"nullable JSON column, code supplies the default" pattern as `Organization.crmSettings` (Phase 8) —
+master spec §37's "All rules must be configurable" applies to this phase's rules exactly as it did
+to RFM's. Migration `20260818010000_phase13_ai`.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their

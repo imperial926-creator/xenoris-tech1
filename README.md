@@ -27,9 +27,13 @@ equity so it always balances, a direct-method cash flow statement, and an owner-
 dashboard — every figure computed live from the posted ledger, never from UI aggregates), and
 Phase 12 (owner analytics: revenue, profit, customer, product, channel, inventory, and
 operational dashboards — six live-computed from Orders/Reservations/Catering/Inventory directly,
-and Profit reusing Phase 11's income statement so it never disagrees with the ledger) are
-implemented. Everything else (AI, notifications) is not built yet — see `docs/architecture.md`
-for the phase order.
+and Profit reusing Phase 11's income statement so it never disagrees with the ledger), and
+Phase 13 (AI: a deterministic, template-based insight-generation engine — sales/margin/expense/
+customer/product/inventory/demand trend detection over configurable thresholds, plus a disclosed
+revenue forecast — reading only through read-only tools over Phase 12's own analytics, never given
+database write access, with every insight naming the real data it came from) are implemented.
+Everything else (notifications, hardening, deployment) is not built yet — see
+`docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or

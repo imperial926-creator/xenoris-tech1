@@ -933,8 +933,105 @@ response. Financial and inventory calculations are never trusted from the client
   dashboards against real fixtures built through the existing service layer (see that file for the
   full list, including the profit-bucket-reconciliation proof above).
 
-**Not yet built** (Phases 13–16 per `docs/architecture.md`): AI insights, notifications, hardening,
-deployment.
+**Phase 13 — AI: done.**
+
+- Master spec's "PHASE 13 — AI" build list: AI analytics service, read-only business data tools,
+  insight generation, trend analysis, forecasting where appropriate — "Do not give AI unrestricted
+  database write access." §38/§39 give the full brief: the AI layer must read verified data
+  through controlled server-side tools/services, always identify the underlying data it used, and
+  never fabricate a financial figure.
+- **Deliberate design call, stated up front**: this is a deterministic, template-based rule engine
+  (`services/ai/InsightService.ts`), not a call to an external language model. §38's own worked
+  example ("Delivery revenue increased 18%. Delivery-related costs increased 26%. Management should
+  investigate: ...") and its "never fabricate financial figures" instruction are both fully
+  satisfiable by a rule engine that only ever emits numbers it just computed from real service
+  calls — no generative model is required to produce that example, and using one would only add a
+  hallucination risk §39 explicitly warns against. §57's "Configurable AI provider... do not
+  hard-code any specific provider" is honored by an optional narration seam (see below) that a real
+  provider can plug into later without any change to the insights themselves.
+- **Read-only business data tools** (`lib/ai/tools.ts`) — its own named deliverable in the build
+  list, distinct from the analytics service. Seven thin, read-only wrappers around Phase 12's
+  `AnalyticsService` methods (one per dashboard), each returning `{ data, source }` — `source`
+  identifies exactly which service call produced the data, threaded onto every insight's
+  `dataSources` field. The `name`/`description` shape on each tool mirrors what a real LLM
+  function-calling integration would bind to, so that seam already exists without changing what
+  data it's allowed to touch. `AI_TOOLS` is keyed with explicit literal keys rather than
+  `[tool.name]` computed properties on purpose — a computed key typed as plain `string` would
+  collapse the object's inferred type into a generic index signature instead of seven precisely
+  typed entries, the same class of TS inference gap this file's Known Issues section already
+  documents twice over.
+- **Insight generation and trend analysis** (`services/ai/InsightService.generateInsights`): every
+  rule compares the requested period against the immediately preceding period of equal length
+  (`AnalyticsService`'s own `previousPeriod`/`percentChange` helpers, now exported and reused here
+  so "previous period" means the same thing in Analytics and in AI Insights), and only surfaces an
+  insight when the change crosses a threshold from `lib/ai/thresholds.ts` — master spec §37's "All
+  rules must be configurable," answered with the exact `DEFAULT_* constant + Organization.aiSettings
+  JSON override` pattern `lib/crm/rfm.ts` already established for RFM segmentation (new nullable
+  `Organization.aiSettings` column, migration `20260818010000_phase13_ai`). Nine rules across all
+  seven "AI can analyze" categories: sales trend (`getRevenueDashboard`'s own previous-period
+  figure); margin change (gross/net margin from `getProfitDashboard`'s ledger-sourced totals);
+  generic per-ledger-account expense trend (iterates every COGS/EXPENSE account, flags a swing past
+  threshold, plus a "new expense" case when an account had nothing in the prior period); a
+  **channel cost-vs-revenue divergence** rule specifically for Delivery and Catering (the two
+  channels the seeded chart of accounts gives a dedicated COGS account) — this is §38's worked
+  example made concrete, comparing `channelAndDemandTool`'s channel revenue against
+  `profitAndMarginTool`'s matching COGS account; customer repeat-rate change; product-category
+  revenue trend (by menu category, not individual top-10 product, since a product absent from one
+  period's top 10 can't be compared to its own prior figure but every category is always present);
+  inventory waste-cost trend and a critical-stock alert; and an always-on informational
+  demand-pattern insight (peak hour/weekday, no threshold — there's no meaningful "previous period"
+  comparison for an hour/weekday distribution the way there is for a single total). Insights sort
+  ATTENTION-then-OPPORTUNITY-then-INFO, matching §76's own AI Business Insights framing ("What
+  changed? Why did it change? What requires attention? What opportunity exists?").
+- **Forecasting where appropriate** (`InsightService.forecastRevenue`): a documented, disclosed
+  naive least-squares linear regression over the selected period's own revenue trend buckets
+  (`salesTrendTool`), projected 1-6 buckets forward (bounded by `lib/validation/ai.ts`'s
+  `periodsAhead`, since a naive linear projection more than a handful of buckets out stops being
+  "appropriate" and starts being fiction). Requires at least 3 historical buckets or returns
+  `status: 'insufficient_data'` rather than projecting from too little history to mean anything;
+  every projected value is clamped at zero. Deliberately revenue-only — compounding a second,
+  independently-noisy series (margin, profit) on top of an already-noisy linear projection would
+  read as a financial promise this codebase has no basis to make.
+- **Optional AI-provider narration** (`lib/ai/AIProvider.ts`) — same "unconfigured stub that fails
+  loudly" pattern as `lib/payments/PaymentProvider.ts`'s `UnconfiguredPaymentProvider`. A configured
+  provider may only turn `InsightService`'s already-computed `Insight[]` into better-written prose;
+  it is never handed a database connection or a raw prompt, and it is never asked to supply a
+  number that wasn't already in its input — the safety boundary §39 requires, enforced by the type
+  signature (`AiNarrationRequest.insights`) rather than by convention alone. No provider is
+  registered yet (`getAIProvider()` always returns `UnconfiguredAIProvider`), so
+  `generateInsights`'s `narrativeStatus` is always `'not_configured'` today; the deterministic
+  insights are the complete feature either way, exactly as intended.
+- Permissions: no new grant — `/api/ai/insights` and `/api/ai/forecast` both require
+  `ANALYTICS_VIEW` **and** `FINANCE_VIEW`, the same two-permission gate as Phase 12's Profit
+  dashboard and for the same reason: several rules here (margin, expense trend, channel divergence)
+  are sourced from the ledger via `profitAndMarginTool`, exactly the COGS/expense-derived data
+  Phase 10 already withholds from `MANAGER`. Splitting the feed into a finance-gated half and an
+  analytics-only half would reopen that boundary through a new URL, so the whole feed requires both,
+  same as Profit.
+- Dashboard UI: `components/ai/insights-board.tsx` (new `/dashboard/ai-insights` page, added to the
+  nav after Analytics) — a severity-colored card grid (ATTENTION/OPPORTUNITY/INFO), each insight
+  showing its title, summary, metrics with before/after values, recommendations, and data-source
+  attribution, plus a revenue-forecast card. Follows `analytics-board.tsx`'s established filter-bar
+  pattern (branch + §54 date-range presets). Insight cards render via a plain function returning
+  JSX called through `.map(renderInsightCard)`, not a separately-invoked `<InsightCard .../>`
+  component — see the Known Issues entry below for the real (if artifact-caused) diagnostic that
+  shape avoids.
+- Tests: a standalone `tsx` sanity script verified the forecast regression math (a perfectly linear
+  series projects exactly, a flat series stays flat, a declining series clamps at zero, the exact
+  fixture used by the integration test below), `percentChange`, the channel-divergence threshold
+  arithmetic (confirming §38's own worked example, 18%/26%, now fires at this phase's chosen 5-point
+  default divergence threshold), margin-points diffing, and the threshold-override merge shape — 19
+  checks. `tests/integration/ai/insight-service.test.ts` covers real fixtures through the existing
+  service layer: sales trend firing/not-firing, the §38 channel-divergence worked example end to
+  end (plus its own expense-trend account rule co-firing, and both correctly suppressed below the
+  minimum-amount floor), customer repeat-rate improvement, product-category performance, waste-cost
+  trend plus critical-stock alert together, the always-on demand-pattern insight, threshold
+  configurability (a raised `Organization.aiSettings` override suppressing an insight the default
+  would have surfaced), branch-ownership rejection, and both forecast statuses (insufficient-data,
+  and an exact-value regression check against a hand-computed fixture: `[150, 0, 300, 0, 450]` ->
+  projects to `360.00` then `420.00`).
+
+**Not yet built** (Phases 14–16 per `docs/architecture.md`): notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -1318,6 +1415,39 @@ deployment.
   recorded when Phase 11 was built — a trailing-newline/counting-method artifact between sessions,
   not a real drift; every phase's own diff was still run against its own freshly-measured baseline,
   which is what actually matters.)
+
+- **A new diagnostic category surfaced while building Phase 13's insights dashboard UI, traced to
+  its root cause before deciding how to handle it.** The first draft of
+  `components/ai/insights-board.tsx` rendered each insight via a separately-defined
+  `<InsightCard insight={insight} />` component invoked from inside a `.map()`, exactly the shape
+  React code normally takes. That produced a genuine-looking `TS2322`: `Type '{ key: any; insight:
+  any; }' is not assignable to type '{ insight: Insight; }'`. Root cause: this sandbox has no
+  `node_modules`, so the `react` import itself fails to resolve (`TS2307`) — every `useState`-derived
+  value in the file becomes `any`, and, separately, the special-casing that normally lets JSX's `key`
+  prop bypass a component's declared prop-type check lives in `@types/react`'s own JSX namespace
+  augmentation, which is also missing. Without it, TS falls back to raw structural checking and
+  treats `key` as a genuine excess property on `{ insight: Insight }`. No prior phase's board
+  components had hit this specific combination (a `.map()` over React-state-derived data, rendering
+  a locally-defined, strictly-typed sub-component via a JSX tag) — every existing board either calls
+  its sub-components directly with a single prop (`analytics-board.tsx`'s `TrendTable`/
+  `ProductTable`) or maps over a plain, non-state-derived constant into an already-untyped intrinsic
+  element. Rather than add a fourth JSX-shaped diagnostic category to the accepted list on faith,
+  the code was restructured to match this codebase's own established shape: `InsightCard` became a
+  plain function returning JSX (`renderInsightCard`), called as `.map(renderInsightCard)` with `key`
+  assigned directly on the returned `<Card>` — functionally identical, and the diagnostic disappeared
+  entirely on the next `tsc` run, confirmed by a second before/after diff.
+
+- **Full Phase 13 `git stash -u` before/after `tsc` diff** (checked out to the pre-Phase-13 commit
+  `03bdbe5`, re-ran `tsc --noEmit`, popped the stash back), run cumulatively across all four of this
+  phase's commits: baseline 3,127 diagnostics, after Phase 13 3,226 — 99 more, entirely inside
+  already-established categories (`TS7026` +82, dominated by `insights-board.tsx`'s JSX table/card
+  rows; `TS7006` +8; `TS2307` +6, one per new file importing an unresolvable package —
+  `@prisma/client` in `InsightService.ts`, `zod` in `lib/validation/ai.ts`, `next/server` in the two
+  new API routes, `react` in `insights-board.tsx`, `vitest` in the new test file; `TS2591` +1 for
+  `lib/ai/AIProvider.ts`'s `process.env` read; `TS2882` +2 for `lib/ai/tools.ts`/`InsightService.ts`'s
+  `server-only` imports). Zero new diagnostic categories anywhere (the `TS2322` above was fixed, not
+  suppressed, before this final diff was taken), and the two pre-existing non-artifact diagnostics
+  (`TS2345` in `app/dashboard/layout.tsx`, `TS18046` in `lib/utils/api-error.ts`) are unchanged.
 
 ## Required Environment Variables
 

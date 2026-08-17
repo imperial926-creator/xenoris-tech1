@@ -968,3 +968,100 @@ pure read/aggregation over tables Phases 1–11 already built. Master spec §55 
 of every major report) remains deliberately unscheduled — confirmed via grep, again, to not be
 assigned to any phase's own build list — documented via the `/dashboard/reports` "Exports"
 placeholder rather than silently dropped.
+
+## 21. Phase 13 — AI
+
+`services/ai/InsightService.ts` is the master spec's "AI analytics service" (§37's Phase 13 build
+list: AI analytics service, read-only business data tools, insight generation, trend analysis,
+forecasting where appropriate). §38/§39 set the brief: analyze sales/customer/product/inventory/
+expense/margin/demand trends, identify the underlying data used, never fabricate a figure, never
+give the AI layer unrestricted database access.
+
+**Design call: a rule engine, not a language model.** §38's own worked example ("Delivery revenue
+increased 18%. Delivery-related costs increased 26%. Management should investigate: ...") and its
+"never fabricate financial figures" instruction are both fully satisfiable by a deterministic engine
+that only ever emits numbers it just computed from real service calls — no generative model is
+needed to produce that example, and using one would add exactly the hallucination risk §39 warns
+against. §57's "Configurable AI provider... do not hard-code any specific provider" is honored by an
+optional narration seam (`lib/ai/AIProvider.ts`) a real provider can plug into later without
+changing the insights themselves.
+
+**Read-only business data tools** (`lib/ai/tools.ts`) — its own named deliverable, distinct from the
+analytics service. Seven thin wrappers around Phase 12's `AnalyticsService` methods (one per
+dashboard: sales, profit/margin, customer, product, channel/demand, inventory, operational), each
+returning `{ data, source }`. This is the concrete implementation of §39's data-flow diagram:
+
+```text
+AI
+↓
+Read-only analytics tools     (lib/ai/tools.ts)
+↓
+Verified database queries     (AnalyticsService / ReportingService)
+↓
+Business data
+```
+
+`source` on every tool result is threaded onto every insight's `dataSources` field — §38's "AI
+responses must always identify the underlying data used," enforced structurally (an `Insight`
+literally cannot be constructed without it) rather than by convention.
+
+**Insight generation and trend analysis** (`InsightService.generateInsights`). Every rule compares
+the requested period against the immediately preceding period of equal length
+(`AnalyticsService.previousPeriod`/`percentChange`, exported from Phase 12 and reused here so
+"previous period" means the same thing in both features), and only surfaces an insight past a
+threshold in `lib/ai/thresholds.ts` — §37's "All rules must be configurable," answered with the same
+`DEFAULT_* constant + Organization.<phase>Settings JSON override` pattern `lib/crm/rfm.ts`
+established for RFM (new nullable `Organization.aiSettings` column; see `docs/database.md`). Nine
+rules span the seven "AI can analyze" categories:
+
+- **Sales trend** — `getRevenueDashboard`'s own previous-period comparison, thresholded.
+- **Margin change** — gross and net margin (from `getProfitDashboard`'s ledger-sourced totals),
+  points-based threshold.
+- **Expense trend** — iterates every COGS/EXPENSE ledger account, flagging any account whose amount
+  swings past threshold (or is new this period), gated on a minimum amount so a tiny account's noisy
+  percent swings don't flood the feed.
+- **Channel cost-vs-revenue divergence** — §38's worked example made concrete, for the two channels
+  the seeded chart of accounts gives a dedicated COGS account (Delivery, Catering): compares that
+  channel's own revenue growth rate against its linked COGS account's growth rate, firing when cost
+  is outpacing revenue by more than a configurable point gap.
+- **Customer behavior** — repeat-rate change, points-based threshold, alongside new-customer counts.
+- **Product performance** — by menu category (not individual top-10 product: a product absent from
+  one period's top 10 can't be compared to its own prior figure, but every category is always
+  present, so category-level trend is the robust comparison).
+- **Inventory trends** — waste-cost trend, plus a critical-stock count alert (a point-in-time
+  threshold, not a period-over-period trend).
+- **Demand patterns** — an always-on informational insight naming the period's peak hour and
+  weekday; no threshold, since there's no meaningful "previous period" comparison for an hour/
+  weekday distribution the way there is for a single total.
+
+Insights sort ATTENTION, then OPPORTUNITY, then INFO — §76's own AI Business Insights framing
+("What changed? Why did it change? What requires attention? What opportunity exists?").
+
+**Forecasting where appropriate** (`InsightService.forecastRevenue`) — a disclosed, naive
+least-squares linear regression over the period's own revenue trend buckets, projected 1-6 buckets
+forward (bounded in `lib/validation/ai.ts`; beyond a handful of buckets a naive linear projection
+stops being "appropriate" per §37's own hedge). Requires at least 3 historical buckets or returns
+`status: 'insufficient_data'`; every projected value is clamped at zero. Revenue-only by design —
+compounding a second, independently-noisy series (margin, profit) on an already-noisy projection
+would read as a financial promise this codebase has no basis to make.
+
+**Optional AI-provider narration** (`lib/ai/AIProvider.ts`) — the same "unconfigured stub that fails
+loudly" shape as `lib/payments/PaymentProvider.ts`. A configured provider may only turn
+`InsightService`'s already-computed `Insight[]` into prose; its input type
+(`AiNarrationRequest.insights`) is the complete, closed set of facts it may describe — it is never
+handed a database connection or a raw prompt, and can never supply a figure that wasn't already
+computed. No provider is registered in this codebase (`getAIProvider()` always returns
+`UnconfiguredAIProvider`, reading `AI_PROVIDER_KEY` per `.env.example`), so `narrativeStatus` is
+always `'not_configured'` — the deterministic insights are the complete feature regardless.
+
+Permissions: no new grant. `/api/ai/insights` and `/api/ai/forecast` both require `ANALYTICS_VIEW`
+**and** `FINANCE_VIEW` — the same two-permission gate Phase 12's Profit dashboard uses, for the same
+reason: margin/expense-trend/channel-divergence insights are sourced from the ledger, exactly the
+COGS/expense-derived data Phase 10 withholds from `MANAGER`. Splitting the single feed into a
+finance-gated half and an analytics-only half would reopen that boundary through a new URL.
+
+Dashboard UI: `components/ai/insights-board.tsx` (`/dashboard/ai-insights`) — a severity-colored card
+grid plus a revenue-forecast card, following `analytics-board.tsx`'s filter-bar pattern.
+
+Scope boundary, stated plainly: this phase adds exactly one nullable JSON column
+(`Organization.aiSettings`) and no new tables — see `docs/database.md`.
