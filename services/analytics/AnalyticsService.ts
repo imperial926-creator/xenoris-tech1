@@ -58,14 +58,26 @@ function sumDecimal(values: ReadonlyArray<Prisma.Decimal | number | string>): Pr
   return values.reduce((sum: Prisma.Decimal, v) => sum.plus(v), ZERO);
 }
 
-/** Percent change from `previous` to `current`, or null when there's no meaningful baseline (previous period had nothing). */
-function percentChange(current: Prisma.Decimal, previous: Prisma.Decimal): number | null {
+/**
+ * Percent change from `previous` to `current`, or null when there's no
+ * meaningful baseline (previous period had nothing). Exported (Phase 13):
+ * lib/ai/tools.ts reuses this exact function for every insight-engine
+ * comparison rather than re-deriving percent-change rounding elsewhere —
+ * "18% increase" must mean the same thing in Analytics and in AI Insights.
+ */
+export function percentChange(current: Prisma.Decimal, previous: Prisma.Decimal): number | null {
   if (previous.isZero()) return null;
   return current.minus(previous).dividedBy(previous).times(100).toDecimalPlaces(1).toNumber();
 }
 
-/** The immediately-preceding period of the same length as [startDate, endDate] — used by every dashboard's "vs. last period" comparison. */
-function previousPeriod(startDate: Date, endDate: Date): { startDate: Date; endDate: Date } {
+/**
+ * The immediately-preceding period of the same length as
+ * [startDate, endDate] — used by every dashboard's "vs. last period"
+ * comparison. Exported (Phase 13): the AI insight engine's own period-over-
+ * period comparisons reuse this so "previous period" means the same date
+ * range in Analytics and in AI Insights.
+ */
+export function previousPeriod(startDate: Date, endDate: Date): { startDate: Date; endDate: Date } {
   const durationMs = endDate.getTime() - startDate.getTime() + 1;
   const prevEnd = new Date(startDate.getTime() - 1);
   const prevStart = new Date(prevEnd.getTime() - durationMs + 1);

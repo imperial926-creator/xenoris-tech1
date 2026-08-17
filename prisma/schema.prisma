@@ -75,6 +75,15 @@ model Organization {
   // that per-organization, without a new table for a handful of numbers.
   crmSettings Json?
 
+  // Phase 13 — AI. Per-organization overrides for the insight-generation
+  // thresholds in lib/ai/thresholds.ts (how big a swing in sales/margin/
+  // expense/waste/repeat-rate counts as worth surfacing). Same "nullable
+  // JSON column, code supplies the default" pattern as crmSettings directly
+  // above — master spec's own "All rules must be configurable" line (§37,
+  // the section immediately preceding AI Business Intelligence) applies to
+  // these rules exactly as it did to RFM's.
+  aiSettings Json?
+
   @@map("organizations")
 }
 
