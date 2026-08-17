@@ -647,8 +647,121 @@ response. Financial and inventory calculations are never trusted from the client
   unit-converted ingredient consumption and COGS, plus the two silent-skip cases (no recipe, no
   `InventoryItem` at that branch); `getLowStockItems`/`getLowStockCount` threshold classification.
 
-**Not yet built** (Phases 10–16 per `docs/architecture.md`): accounting ledger, financial
-reporting, owner analytics, AI insights, notifications, hardening, deployment.
+**Phase 10 — Accounting: done.**
+- Prisma schema additions: `ChartOfAccount` (org-scoped, seeded per-org), `AccountingPeriod`
+  (calendar-month buckets, lazily created), `JournalEntry`/`JournalEntryLine`
+  (`DRAFT -> POSTED -> REVERSED`, a DB `CHECK` enforcing exactly-one-of-debit-or-credit per line),
+  `FinancialTransaction` (the `(referenceType, referenceId, type)`-unique idempotency/link layer
+  master spec §47 asks for), `Vendor`/`ExpenseCategory`/`Expense`/`ExpenseAttachment`; plus
+  `AccountType`, `DebitCredit`, `AccountingPeriodStatus`, `JournalEntryStatus`,
+  `FinancialTransactionType`, `ExpenseApprovalStatus` enums. See the "Phase 10 — Accounting"
+  comment block in `schema.prisma` for the ten numbered design decisions in full; the short
+  version below.
+- `AccountingService.ensureChartOfAccounts` seeds the master-spec-§28 30-account chart
+  (idempotent — check-then-create) and is called from two places: `AuthService.register`'s
+  existing transaction (every organization created from Phase 10 onward gets it automatically,
+  the same "provision everything a brand-new org needs, in one transaction" discipline as
+  role/permission seeding), and by hand in `prisma/seed.ts` for the demo org, which predates this
+  phase and was only ever `upsert`'d, never freshly `create`'d through `AuthService.register`.
+- A posted `JournalEntry` is never edited — no service method touches a `POSTED` entry's lines;
+  the only correction path is `reverseJournalEntry`, which creates a brand-new `POSTED` entry with
+  every line's debit/credit swapped (referencing the original via `reversalOfEntryId`, `@unique`
+  so an entry can only ever be reversed once) and flips the original to `REVERSED` — a lifecycle
+  marker, not a content edit. Master spec §27: "do not allow a posted journal entry to be directly
+  edited... use reversal/correction entries."
+- The financial transaction engine (`AccountingService`'s `record*` methods) is the single place
+  every real business event becomes ledger postings, called from inside each triggering service's
+  own already-open transaction (the established "one business event, one transaction" discipline):
+  `OrderService.updateStatus`'s `COMPLETED` transition posts revenue (Cash/Accounts-Receivable
+  split by how much of the order is actually paid so far, Credit the order-type-matched revenue
+  account, Credit Taxes Payable) and COGS (Debit Food Cost, Credit Inventory, using the exact
+  consumption cost `InventoryService.consumeForOrder` now returns — its signature changed from
+  `Promise<void>` to `Promise<Prisma.Decimal>` this phase) as two **independent** entries — an
+  order with ingredients consumed but zero net revenue still posts COGS, and vice versa.
+  `ReservationService.recordDeposit`/`updateStatus` and `CateringService.recordPayment` post
+  deposits as a liability first, never straight to revenue (master spec §23: "do not automatically
+  classify customer deposits as earned revenue") — a reservation deposit is earned only when the
+  reservation reaches `COMPLETED`; a catering event's revenue is recognized on its `BALANCE`
+  payment, and the amount recognized is **the sum of actual payments received to date** (every
+  prior `DEPOSIT` plus this `BALANCE`), never the quoted `CateringEvent.total` — a deliberate
+  choice so the entry is always grounded in real recorded cash movements, honoring §29's "AI must
+  never directly invent accounting entries" even if a customer ends up paying slightly more or
+  less than quoted. `InventoryService.receivePurchaseOrderItems` posts Debit Inventory / Credit
+  Accounts Payable (idempotency keyed to the **receiving call's own `InventoryTransaction` id**,
+  not the `PurchaseOrder` id — a PO can legitimately be received against multiple times via
+  partial receiving, and a PO-level key would silently block every receipt after the first from
+  ever posting); `InventoryService.recordWaste` posts Debit Waste / Credit Inventory (a
+  `WasteRecord` row is already a distinct entity per event, so it's a safe idempotency key on its
+  own). Unlike Phase 9's best-effort inventory consumption, **none of these are best-effort** — a
+  missing chart-of-accounts entry throws (a setup bug, not a normal per-branch data gap), since
+  silently losing revenue from the books is worse than blocking the triggering business event.
+- Expenses follow a create-(`PENDING`)-then-approve/reject flow. `approveExpense` posts Debit the
+  category's configured default account / Credit Cash-or-Bank (by payment method) and refuses if
+  the category has no default account configured, rather than guessing one — the same
+  never-invent-an-entry discipline. `Vendor` (general business overhead, feeds `Expense`) is kept
+  deliberately separate from Phase 9's `Supplier` (ingredients, feeds `PurchaseOrder`) despite
+  structural similarity — the master spec lists them in separate sections with separate purposes.
+- Balances: `getAccountBalance` (signed by the account's `normalBalance`) and
+  `generateTrialBalance` (every active account's posted debit/credit totals plus the overall
+  `SUM(DEBITS) = SUM(CREDITS)` check master spec §49 asks for — an honest N+1 across accounts,
+  same flagged pattern as Phase 8's `segmentBreakdown`) are built this phase since they're needed
+  to prove that invariant; the *presentational* reports (income statement, balance sheet, cash
+  flow, financial dashboard UI) are Phase 11's job per its own separate build list.
+- Permissions: no new grant needed — `finance:view`/`finance:manage` already existed in Phase 1's
+  forward-looking catalog, already granted only to `ACCOUNTANT`/`OWNER`/`ADMINISTRATOR` —
+  deliberately **not** granted to `MANAGER` (finance is accountant/owner territory, confirmed by
+  reading `DEFAULT_ROLE_PERMISSIONS` before assuming a gap).
+- API routes: org-scoped under `/api/finance/accounts` (+ `/[accountId]`), `/journal-entries` (+
+  `/[entryId]`, `/[entryId]/post`, `/[entryId]/reverse`), `/trial-balance`, `/periods` (+
+  `/[periodId]/close`), `/vendors` (+ `/[vendorId]`), `/expense-categories` (+ `/[categoryId]`);
+  branch-scoped under `/api/branches/[id]/finance/expenses` (+ `/[expenseId]`,
+  `/[expenseId]/approve`, `/[expenseId]/reject`, `/[expenseId]/attachments`).
+- Dashboard UI: a Finance board (`/dashboard/finance`) with five sections — Chart of Accounts
+  (grouped by type, activate/deactivate, add a custom account), Journal Entries (list + a manual
+  entry builder with dynamic debit/credit lines and a live balance check + post/reverse actions),
+  Trial Balance (as-of-date, per-account debit/credit/balance, a Balanced/Out-of-balance badge),
+  Periods (list + close action), Expenses (branch-scoped list + record/approve/reject, plus
+  vendor and expense-category management).
+- Seed data extended: the full 30-account chart for the demo org (via `ensureChartOfAccounts`,
+  hand-mirrored since this script cannot import service classes — see the environment-constraints
+  note below), a posted manual journal entry (owner's initial capital contribution) and a draft
+  one (petty cash top-up, demonstrating the Post/Reverse UI), 2 vendors, 3 expense categories (2
+  with a default account configured, 1 deliberately without one to demonstrate
+  `approveExpense`'s refusal to guess), and 3 expenses (1 approved/posted, 2 pending — one in the
+  no-default-account category).
+- Tests: schema validation (the debit/credit-exactly-one-side refine, min-2-lines, the
+  nullable-clearable `defaultAccountId` union); `AccountingService` core mechanics (chart
+  seeding + idempotency, balanced/unbalanced entry creation, post/reverse lifecycle and
+  double-reversal rejection, trial balance always summing debits=credits, period-close blocking
+  on outstanding drafts and on future postings once closed, vendor/category CRUD, expense
+  approve/reject including the no-default-account refusal); and — per master spec §49's exact
+  test list — a dedicated integration suite driving the real wiring (not `AccountingService`
+  directly) through `OrderService`/`ReservationService`/`CateringService`/`InventoryService`:
+  balanced revenue + COGS entries on order completion (both fully-paid and partially-paid/AR
+  cases), reservation deposit paid/refunded/earned, catering deposit-received and
+  balance-settlement-uses-actual-payments, PO receiving (including that partial receiving posts
+  a separate entry each time, proving the idempotency key choice), waste, a mixed-event scenario
+  proving the trial balance stays balanced end-to-end, and — §49's explicit final instruction —
+  a test proving that **deleting an order does not corrupt its accounting history** (the journal
+  entry/lines have no FK back to `Order` at all, only the loose `referenceType`/`referenceId`
+  string link).
+- **Master spec §68 accounting disclaimer, flagged explicitly and not silently assumed**: this
+  architecture is technically sound (balanced double-entry, immutable posted entries, idempotent
+  automatic postings) but does **not** assume Philippine tax/accounting compliance automatically.
+  Before this ledger is used for real filings, a Philippine accountant/tax professional should
+  verify: VAT/tax treatment (this build applies a flat 12% VAT to order/catering totals and
+  credits it to "Taxes Payable" — no BIR-specific input/output VAT netting, zero-rating, or
+  official-receipt sequencing is implemented), official invoicing requirements (Phase 4's
+  `Invoice`/`InvoiceSequence` numbering is a per-branch sequence, not necessarily BIR's
+  accreditation format), revenue recognition timing (this build's deposit-earned-on-completion
+  and balance-settlement-recognizes-actual-payments rules are reasonable defaults, not
+  professionally reviewed policy), payroll (not built at all — `Payroll` is only a seeded expense
+  account name, no payroll engine exists), withholding tax (not implemented anywhere), and data
+  privacy (no Philippine Data Privacy Act-specific review has been done on any phase's PII
+  handling).
+
+**Not yet built** (Phases 11–16 per `docs/architecture.md`): financial reporting, owner analytics,
+AI insights, notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -889,6 +1002,61 @@ reporting, owner analytics, AI insights, notifications, hardening, deployment.
   they were recreated transiently in this sandbox only to confirm the local Postgres password,
   then removed again since `node_modules` doesn't exist here to actually execute anything against
   them (see the entry above).
+  Phase 10's migration (`prisma/migrations/20260816010000_phase10_accounting/migration.sql`) adds
+  six enums and nine new tables (`chart_of_accounts`, `accounting_periods`, `journal_entries`,
+  `journal_entry_lines`, `financial_transactions`, `expense_categories`, `vendors`, `expenses`,
+  `expense_attachments`); hand-written and applied clean to both the dev and test local Postgres
+  databases (via the same `/root` 700-permission `/tmp`-copy workaround as Phase 9). A
+  10-assertion smoke test verified: a 3-line balanced entry sums exactly; a line with
+  debit=credit=0 rejected by the `CHECK` constraint; a line with both debit>0 and credit>0
+  rejected by the same `CHECK`; an entry can be reversed at most once
+  (`reversalOfEntryId`'s `@unique`); `financial_transactions` rejects a duplicate
+  `(referenceType, referenceId, type)` idempotency key; deleting a `chart_of_accounts` row
+  referenced by a posted line is blocked (`RESTRICT`); deleting a journal entry cascades its
+  lines; expense/category/vendor/journal-entry wiring round-trips exactly (₱25,000.00); deleting
+  a `Vendor` `SET NULL`s the expense's `vendorId` (preserving expense history, unlike Phase 9's
+  `Supplier`, which is `RESTRICT`); and an undocumented `JournalEntryStatus` value is rejected by
+  the enum type. All passed. One genuine bug was caught and fixed during this phase's own
+  self-review, before it ever reached a test run: `AccountingService.postAutomaticEntry`'s
+  idempotency pre-check originally built its `include` as
+  `{ journalEntry: { include: JOURNAL_ENTRY_INCLUDE.lines } }` — since `JOURNAL_ENTRY_INCLUDE` is
+  `{ lines: { include: { account: true } } }`, `.lines` there is `{ include: { account: true } }`,
+  so the nested include became `{ journalEntry: { include: { include: { account: true } } } }` —
+  an invalid shape (an `include` field named "include") that `tsc` cannot catch in this sandbox
+  since Prisma Client's generated types don't exist here (the whole expression collapses to
+  `any`). Fixed to reuse `JOURNAL_ENTRY_INCLUDE` directly:
+  `{ journalEntry: { include: JOURNAL_ENTRY_INCLUDE } }`. Worth flagging as a category of bug this
+  sandbox's TS-syntax-only verification cannot catch by construction — any Prisma query-shape
+  mistake needs a careful manual re-read (which is what caught this one), since the module
+  resolution failure that produces the `TS2307`-cascade-to-`any` filtering pattern this whole
+  session relies on also means the compiler can't validate `include`/`where`/`select` shapes at
+  all. The `git stash -u` before/after TypeScript diff (checked out to the pre-Phase-10 commit
+  `5bdc892`, re-ran `tsc --noEmit`, popped the stash back) confirmed the same result as every
+  prior phase: baseline was 2,181 diagnostics, after Phase 10 was 2,613 — 432 more, entirely
+  inside already-established categories (`TS7026` +256, `TS7006` +150, `TS2307` +25, `TS2882` +1
+  — one new `server-only` import in `AccountingService.ts`, the identical pattern every other
+  service file hits). Zero new diagnostic categories. The two pre-existing non-artifact
+  diagnostics (`TS2345` in `app/dashboard/layout.tsx`, `TS18046` in `lib/utils/api-error.ts`) are
+  unchanged from every prior phase's count. No `TS2322` key-prop diagnostic appeared —
+  `finance-board.tsx`'s list renders (accounts by type, journal entries, journal entry lines,
+  trial balance rows, periods, expenses, vendors, expense categories) all render their `.map()`
+  rows inline, same discipline as every phase since 6. Also worth noting: `prisma/seed.ts`
+  deliberately never imports service classes (their `server-only` imports only resolve correctly
+  inside the Next.js server runtime, not a plain `tsx`/`node` script) — so this phase's chart-of
+  -accounts seeding for the demo org, and its one hand-posted "approved expense" example, are
+  hand-mirrored copies of `AccountingService`'s own logic rather than calls into it, same
+  discipline as every prior phase's seed data. A second, unrelated `tsc` finding surfaced while
+  writing that hand-mirrored code: `new Map(rows.map((a) => [a.name, a]))` (building a
+  name-keyed lookup straight from a `.map()` callback) infers the Map's value type as `{}`, not
+  the row type, under this project's `noUncheckedIndexedAccess` + `strict` settings once a
+  Prisma-typed (`any`, in this sandbox) source is involved — confirmed via a minimal standalone
+  repro, and not new to Phase 10's own code (`AuthService.ts`'s pre-existing `permissionByKey`
+  hits the identical inference gap, just never surfaced as an error because nothing ever
+  dereferences a property off one of its `.get()` results). Fixed everywhere this phase
+  introduced the pattern (`prisma/seed.ts`, both new accounting test files) by switching to an
+  explicit `new Map<string, (typeof rows)[number]>()` plus a populate-by-loop — the same shape
+  `itemByName`/`categoryByName` already used elsewhere in `seed.ts`. Worth remembering for any
+  future phase that reaches for `new Map(x.map(...))` against a Prisma query result.
 
 ## Required Environment Variables
 

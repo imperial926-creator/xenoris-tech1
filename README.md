@@ -15,10 +15,14 @@ folded into the order total), Phase 7 (catering: inquiry → quote → accept �
 final payment funnel, server-computed quote totals, staff-recorded quote/event status lifecycle),
 Phase 8 (CRM: customer profiles with addresses/preferences/notes/tags/reviews, lifetime-value
 analytics, live-computed RFM segmentation with configurable thresholds, explicit customer linking
-on orders/reservations/catering), and Phase 9 (inventory: units with conversion, ingredients,
+on orders/reservations/catering), Phase 9 (inventory: units with conversion, ingredients,
 recipes linked to menu items, branch-scoped stock with a full transaction ledger, purchasing,
-stock counts, waste, recipe-based consumption on order completion, COGS) are implemented.
-Everything else (accounting, reporting, analytics, AI, notifications) is not built yet — see
+stock counts, waste, recipe-based consumption on order completion, COGS), and Phase 10
+(accounting: seeded chart of accounts, double-entry journal entries with post/reverse, accounting
+periods, a financial transaction engine automatically posting balanced entries for order
+revenue/COGS, reservation and catering deposits, inventory purchases and waste, an
+expense-approval flow, and a trial balance proving debits always equal credits) are implemented.
+Everything else (financial reporting, analytics, AI, notifications) is not built yet — see
 `docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network

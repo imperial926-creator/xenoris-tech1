@@ -525,14 +525,87 @@ has a non-null `countedQuantity`; partial completion is supported and leaves it 
 pairs with exactly one `WASTE` `InventoryTransaction` (negative `quantityDelta`, `unitCostAtTime`
 stamped from the ingredient's current `costPerUnit` at time of waste).
 
+## Phase 10 Schema
+
+### ChartOfAccount
+`id, organizationId, code, name, type (AccountType), normalBalance (DebitCredit), description?,
+isSystem (default true), active (default true)`. Organization-scoped, seeded per-organization
+(master spec §28's 30-account list verbatim, plus one added "Waste" expense account — see
+`docs/architecture.md` § 18) by `AccountingService.ensureChartOfAccounts`, called from
+`AuthService.register`. `AccountType` enum: `ASSET, LIABILITY, EQUITY, REVENUE, COGS, EXPENSE`.
+`DebitCredit` enum: `DEBIT, CREDIT` — `normalBalance` is derivable from `type` but stored
+explicitly so balance queries never need a hardcoded type→side switch. `@@unique([organizationId,
+code])`, `@@unique([organizationId, name])`. Deleting an account referenced by any posted
+`JournalEntryLine` is blocked (`ON DELETE RESTRICT`).
+
+### AccountingPeriod
+`id, organizationId, startDate, endDate, status (AccountingPeriodStatus, default OPEN), closedAt?,
+closedByUserId? (ON DELETE SET NULL)`. A calendar-month bucket (`startDate` always the 1st,
+`endDate` the last instant of the month), lazily created the first time an entry needs to post
+into that month (`AccountingService.resolvePeriodForDate`). `AccountingPeriodStatus` enum: `OPEN,
+CLOSED`. `@@unique([organizationId, startDate])`. Closing refuses if any `DRAFT` entry is still
+dated inside the period; once `CLOSED`, no new or reversing entry may date into it again.
+
+### JournalEntry / JournalEntryLine
+`JournalEntry`: `id, organizationId, branchId? (ON DELETE CASCADE), periodId (ON DELETE RESTRICT),
+entryDate, description, referenceType?, referenceId?, status (JournalEntryStatus, default DRAFT),
+reversalOfEntryId? (@unique, self-FK "JournalEntryReversal"), postedAt?, postedByUserId? (ON
+DELETE SET NULL), createdByUserId? (ON DELETE SET NULL)`. `JournalEntryStatus` enum: `DRAFT,
+POSTED, REVERSED`. `branchId` is nullable — a manual entry can be org-wide (e.g. an owner capital
+contribution) or scoped to one branch; every automatic posting from a branch-scoped business event
+carries its branch. `JournalEntryLine`: `id, journalEntryId (ON DELETE CASCADE), accountId (ON
+DELETE RESTRICT), debit (Decimal(14,2), default 0), credit (Decimal(14,2), default 0),
+description?`. A `CHECK` constraint (`journal_entry_lines_debit_xor_credit_check`) enforces
+`(debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0)` — exactly one side positive, never both,
+never neither — at the database level, not just in application code.
+`AccountingService.assertBalanced` additionally requires `SUM(debit) = SUM(credit)` across an
+entry's lines before it can ever be created or posted (master spec §27/§49's core invariant). A
+`POSTED` entry is never edited; correction is only ever via `reverseJournalEntry`, which creates a
+new `POSTED` entry with every line's debit/credit swapped and flips the original to `REVERSED` —
+see `docs/architecture.md` § 18. Indexed on `[organizationId]`, `[branchId]`, `[periodId]`, and
+`[referenceType, referenceId]` (look up every entry a given order/reservation/payment/PO/waste
+record produced).
+
+### FinancialTransaction
+`id, organizationId, branchId? (ON DELETE CASCADE), type (FinancialTransactionType),
+referenceType, referenceId, journalEntryId (@unique, ON DELETE CASCADE)`.
+`FinancialTransactionType` enum: `ORDER_REVENUE, ORDER_COGS, DEPOSIT_RECEIVED, DEPOSIT_REFUNDED,
+DEPOSIT_EARNED, INVENTORY_PURCHASE, INVENTORY_WASTE, EXPENSE_POSTED`. The idempotency/link layer
+master spec §47 requires: `@@unique([referenceType, referenceId, type])` means a repeated business
+event (a retried request, a duplicate webhook) cannot create a duplicate journal entry for the
+same `(what happened, to what, what kind)` triple — see `docs/architecture.md` § 18 for the PO
+-receiving idempotency-key design decision this enables.
+
+### ExpenseCategory / Vendor / Expense / ExpenseAttachment
+`ExpenseCategory`: `id, organizationId, name, defaultAccountId? (FK to ChartOfAccount, ON DELETE
+SET NULL), active (default true)`. `@@unique([organizationId, name])`. `defaultAccountId` is the
+account an expense in this category posts to on approval; a category with none configured cannot
+have its expenses approved (`AccountingService.approveExpense` refuses rather than guessing).
+`Vendor`: `id, organizationId, name, contactName?, email?, phone?, address?, active (default
+true)`. `@@unique([organizationId, name])`. Kept deliberately separate from Phase 9's `Supplier` —
+a `Supplier` sells ingredients (feeds `PurchaseOrder`/Inventory/Accounts Payable), a `Vendor` is
+billed for general business overhead (feeds `Expense`). `Expense`: `id, organizationId, branchId
+(ON DELETE CASCADE), vendorId? (ON DELETE SET NULL), categoryId (ON DELETE RESTRICT), amount
+(Decimal(12,2)), expenseDate, paymentMethod (OrderPaymentMethod, reused from Phase 4), notes?,
+approvalStatus (ExpenseApprovalStatus, default PENDING), recordedByUserId? (ON DELETE SET NULL),
+approvedByUserId? (ON DELETE SET NULL), journalEntryId? (@unique, ON DELETE SET NULL)`.
+`ExpenseApprovalStatus` enum: `PENDING, APPROVED, REJECTED`. Created `PENDING`; `approveExpense`
+posts Debit `category.defaultAccountId` / Credit Cash-or-Bank (by `paymentMethod`) and sets
+`journalEntryId`; `rejectExpense` sets `REJECTED` and never touches the ledger. `ExpenseAttachment`:
+`id, expenseId (ON DELETE CASCADE), fileName, fileUrl, uploadedByUserId? (ON DELETE SET NULL)`.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
 respective phases, each with its own migration and tests:
 
-- Phase 10: `chart_of_accounts`, `accounting_periods`, `journal_entries`, `journal_entry_lines`,
-  `financial_transactions`, `payments`, `payment_transactions`, `refunds`, `payment_webhooks`,
-  `expenses`, `expense_categories`, `vendors`, `expense_attachments`
+- Not scheduled to a specific phase: `payments`, `payment_transactions`, `refunds`,
+  `payment_webhooks` (master spec §24/§25's external payment-gateway integration layer). Judged
+  out of Phase 10's scope — Phase 4's `OrderPayment` model plus the `lib/payments/PaymentProvider.ts`
+  abstraction stub already cover this build's "staff records that money changed hands" needs, and
+  a real external gateway integration (webhooks, provider-specific transaction states) is
+  meaningfully more scope than any phase's build list calls for today. Revisit only if a real
+  payment gateway integration becomes a concrete requirement.
 
 Introducing all of these now, before the services that use them exist, would violate the "do not
 build in one uncontrolled pass" rule and leave untested tables in the schema — they're documented

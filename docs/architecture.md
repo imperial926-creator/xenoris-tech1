@@ -662,3 +662,118 @@ dashboard needs food-cost accuracy at that granularity. Similarly, the finance s
 explicitly Phase 10's job — this phase builds the real, auditable quantity and cost data those
 journal entries will read from (`getCogsForOrder`, `Ingredient.costPerUnit`, `InventoryTransaction.
 unitCostAtTime`), not the double-entry postings themselves.
+
+## 18. Phase 10 — Accounting
+
+Master spec §27 ("This is a critical subsystem... each journal entry must balance... do not allow
+a posted journal entry to be directly edited"), §28 (the seeded chart of accounts, reproduced
+verbatim), §29 (the financial transaction engine — "every financial event must be mapped to
+accounting entries... financial rules must be deterministic. AI must never directly invent
+accounting entries"), §23 (customer deposits are a liability, not automatic revenue), §30 (expense
+management), §45 (a dedicated `AccountingService` — "the service must be heavily tested"), §47
+(idempotency for financial posting), and §49 (the exact automated-test list this phase's test
+suite follows almost verbatim) together define this phase's scope. §35's income statement/balance
+sheet/cash flow and §36's real-time financial dashboard are explicitly Phase 11's job — this phase
+builds the ledger and the balance/trial-balance primitives Phase 11's reports will read from, not
+the reports themselves (this build additionally does trial balance generation *this* phase, since
+proving §49's SUM(DEBITS)=SUM(CREDITS) invariant needs it and it's listed as an `AccountingService`
+responsibility under §45).
+
+**A posted journal entry is immutable by construction, not by convention.** Master spec §27 is
+direct about this: "do not allow a posted journal entry to be directly edited... use
+reversal/correction entries." Exactly one thing in `AccountingService` is capable of writing to a
+`JournalEntryLine` row — `createJournalEntry` (which only ever creates `DRAFT` entries) and the
+line-creation step inside `postAutomaticEntry`. No method exists that updates a line on an entry
+already in `POSTED` state. Correcting a mistake is only possible through `reverseJournalEntry`,
+which creates an entirely new `POSTED` entry with every line's debit and credit swapped
+(referencing the original via a `reversalOfEntryId` field carrying a database `@unique` constraint,
+so an entry can be reversed at most once) and flips the original's `status` to `REVERSED` — a
+lifecycle marker, never a rewrite of its content. This is the same "the guarantee is a structural
+property of the code, not a rule someone has to remember" discipline Phase 9 used for the
+inventory audit trail, one level up: there, the guarantee was "every quantity change has a ledger
+row"; here it's "every posted entry's content is permanent."
+
+**Deposits are a liability first, always — master spec §23's most concrete rule.** "Do not
+automatically classify customer deposits as earned revenue... make this logic configurable and
+flag local accounting/tax requirements for professional verification." This build implements the
+two funnels that collect deposits differently, since they're shaped differently in the schema:
+`Reservation.depositStatus` is a single status field (`NONE -> PENDING -> PAID -> REFUNDED`), while
+catering has a real `CateringPayment` table with typed `DEPOSIT`/`BALANCE` rows. For reservations,
+`ReservationService.recordDeposit`'s `PENDING/NONE -> PAID` transition posts Debit Cash / Credit
+Customer Deposits; a `PAID -> REFUNDED` transition reverses it; and the reservation reaching
+`COMPLETED` while still `PAID` (checked in `updateStatus`) is the one moment the deposit becomes
+earned revenue (Debit Customer Deposits / Credit Dine-in Revenue) — modeling that the service was
+actually delivered, not just booked. For catering, a `DEPOSIT` payment posts the same liability
+entry; a `BALANCE` payment is this build's revenue-recognition trigger, but the amount credited to
+Catering Revenue is **the sum of every actual payment received for that event to date** (every
+`COMPLETED` `DEPOSIT` plus this `BALANCE`), not the quoted `CateringEvent.total` — a deliberate
+choice to keep every entry grounded in real recorded cash movements rather than an assumed number,
+directly honoring §29's "AI must never directly invent accounting entries" even in the edge case
+where a customer ends up paying a different amount than quoted. A catering `BALANCE` payment
+recorded as `REFUNDED` (a full-event refund after revenue was already recognized) is deliberately
+left unwired — reversing an already-recognized revenue entry is exactly the kind of correction
+§27 says should go through `reverseJournalEntry`, an accountant's explicit manual action, not a
+rule this engine invents on its own.
+
+**Idempotency is keyed to the business event, not the parent entity — a real design decision worth
+walking through.** Master spec §47 requires idempotency for financial posting: "a repeated request
+must not accidentally create duplicate... journal entries." Every automatic posting goes through
+`postAutomaticEntry`, which pre-checks a `FinancialTransaction` row keyed on
+`(referenceType, referenceId, type)` (a database `@unique` constraint, not just an application
+check) before creating anything. The interesting case is `InventoryService.receivePurchaseOrderItems`:
+the naive choice is to key on the `PurchaseOrder`'s own id, since that's "the thing being
+received" — but Phase 9 explicitly built partial receiving as a first-class feature (a PO can be
+received against multiple times as shipments arrive), and a PO-level idempotency key would
+silently block every receipt after the first from ever posting its own accounting entry, since the
+second receiving call's `(referenceType='PurchaseOrder', referenceId=po.id, type='INVENTORY_PURCHASE')`
+key would already exist from the first. The fix is to key on **the id of one of the
+`InventoryTransaction` rows that specific receiving call created** instead — naturally unique per
+call, since Phase 9's `applyTransaction` always creates a fresh transaction row on every call. Waste
+doesn't share this problem: each `WasteRecord` row is already a distinct entity per waste event, so
+keying on its own id is safe without modification. This distinction — "is the parent entity
+reusable across multiple postings, or is it a one-shot event" — is the actual test to apply before
+choosing an idempotency key, not just "use the id of whatever object triggered this."
+
+**Financial postings are not best-effort, unlike Phase 9's inventory consumption — a deliberate,
+documented reversal of that precedent.** Every `AccountingService` lookup of a system account
+(`getSystemAccount`) throws `NotFoundError` if the account isn't found, rather than silently
+skipping the posting. This is the opposite choice from `InventoryService.consumeForOrder`'s
+best-effort design (Phase 9), and the reasoning for the difference matters: a menu item missing a
+recipe, or a recipe ingredient missing an `InventoryItem` at one branch, is a normal, expected data
+gap that will exist for plenty of legitimate menu items (not every dish needs inventory tracking) —
+blocking a customer's order over it would be wrong. A missing chart-of-accounts entry, by contrast,
+means the organization was never provisioned correctly (`ensureChartOfAccounts` always runs at
+registration; its absence is a setup bug, not a normal per-item gap), and silently failing to
+record real money moving is a much worse failure mode than blocking the triggering business event
+and surfacing a loud error to fix the setup gap.
+
+**Order revenue posting exercises real judgment about how much of the order is actually paid.**
+`recordOrderRevenue` doesn't assume an order is paid in full just because it reached `COMPLETED` —
+it aggregates the order's `COMPLETED` `OrderPayment` rows, splits the debit side between Cash (the
+paid portion) and Accounts Receivable (the unpaid remainder), credits the order-type-matched
+revenue account (`Order.type` maps 1:1 onto "Dine-in Revenue"/"Take-out Revenue"/"Delivery
+Revenue" by construction, since those enum values were chosen to match the seeded chart's account
+names exactly) net of discount plus delivery fee, and credits collected tax separately to "Taxes
+Payable" rather than folding it into revenue. COGS is posted as a fully independent second entry
+(Debit Food Cost, Credit Inventory) using the exact consumption cost
+`InventoryService.consumeForOrder` computes in the same transaction — its return type changed
+from `Promise<void>` to `Promise<Prisma.Decimal>` this phase specifically so `OrderService` could
+pass that number straight into `recordOrderRevenue` without a second query. The two entries are
+independent on purpose: an order with ingredients consumed but zero net revenue (fully discounted)
+still posts its real COGS, and an order with no recipe match for any of its items still posts
+revenue.
+
+Permissions: no new grant — `finance:view`/`finance:manage` already existed in Phase 1's
+forward-looking catalog, granted only to `ACCOUNTANT`/`OWNER`/`ADMINISTRATOR` and deliberately
+withheld from `MANAGER` (confirmed by reading `DEFAULT_ROLE_PERMISSIONS`, not assumed) — finance is
+accountant/owner territory in this build, unlike inventory/catering which are manager-level.
+
+Scope boundary, stated plainly: this phase builds the ledger and the mechanics that keep it
+correct — chart of accounts, journal entries, the financial transaction engine, expenses, trial
+balance. It does not build the presentational financial reports (income statement, balance sheet,
+cash flow) or the owner-facing financial dashboard — those read from this ledger but are Phase
+11's job per its own separate build list. It also does not implement Philippine-specific tax
+compliance (BIR VAT netting/zero-rating, official-receipt sequencing, withholding tax, payroll) —
+master spec §68 is explicit that this architecture must be technically sound but should not assume
+local compliance automatically, and flags exactly these areas for review by a Philippine
+accountant/tax professional before any of this ledger is used for real filings.
