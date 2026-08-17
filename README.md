@@ -21,8 +21,11 @@ stock counts, waste, recipe-based consumption on order completion, COGS), and Ph
 (accounting: seeded chart of accounts, double-entry journal entries with post/reverse, accounting
 periods, a financial transaction engine automatically posting balanced entries for order
 revenue/COGS, reservation and catering deposits, inventory purchases and waste, an
-expense-approval flow, and a trial balance proving debits always equal credits) are implemented.
-Everything else (financial reporting, analytics, AI, notifications) is not built yet — see
+expense-approval flow, and a trial balance proving debits always equal credits), and Phase 11
+(financial reporting: an income statement, a balance sheet that folds unclosed net income into
+equity so it always balances, a direct-method cash flow statement, and an owner-facing financial
+dashboard — every figure computed live from the posted ledger, never from UI aggregates) are
+implemented. Everything else (owner analytics, AI, notifications) is not built yet — see
 `docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network

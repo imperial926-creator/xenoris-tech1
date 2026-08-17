@@ -760,8 +760,96 @@ response. Financial and inventory calculations are never trusted from the client
   privacy (no Philippine Data Privacy Act-specific review has been done on any phase's PII
   handling).
 
-**Not yet built** (Phases 11–16 per `docs/architecture.md`): financial reporting, owner analytics,
-AI insights, notifications, hardening, deployment.
+**Phase 11 — Financial Reporting: done.**
+
+- Master spec §35: "Reports must be generated from the accounting ledger. Do not calculate
+  financial statements from UI aggregates." `services/reporting/ReportingService.ts` is entirely
+  read-only and queries only posted `JournalEntry`/`JournalEntryLine` rows (joined to
+  `ChartOfAccount`) — nothing in it reads `Order`, `Reservation`, `CateringPayment`, or any other
+  business-event table. Trial balance and single-account balances (`AccountingService`) were
+  already built in Phase 10 and are reused as-is, per that phase's own scope call, now validated
+  by the master spec's own Phase 11 build list naming them alongside the reports below.
+- `generateIncomeStatement(organizationId, {startDate, endDate, branchId?})`: Revenue − COGS =
+  Gross Profit; − Operating Expenses = Net Profit, aggregated per account (signed by the account's
+  own `normalBalance`, so callers never re-sign a raw debit/credit total themselves) over posted
+  lines in the given range. `DRAFT`/`REVERSED` entries are excluded, same convention as
+  `AccountingService.getAccountBalance`.
+- `generateBalanceSheet(organizationId, {asOfDate, branchId?})`: Assets / Liabilities / Equity as
+  of a point in time. There is no period-closing journal entry in this build (Phase 10's
+  `AccountingPeriod.close` only blocks further postings into a closed period — it never zeroes
+  Revenue/COGS/Expense balances into Retained Earnings), so Revenue/COGS/Expense balances
+  accumulate on the ledger forever. The Balance Sheet folds the still-unclosed cumulative net
+  income (Revenue − COGS − Expense, from inception through `asOfDate`) into Equity — this is
+  exactly what any live system without a year-end close does, and it makes
+  `Assets = Liabilities + Equity` a genuine double-entry guarantee rather than an approximation:
+  every posted entry individually balances, so the identity holds for *any* subset of whole
+  entries, including a single branch's — proven for an arbitrary transaction mix in
+  `tests/integration/reporting/reporting-service.test.ts`.
+- `generateCashFlow(organizationId, {startDate, endDate, branchId?})`: Operating / Investing /
+  Financing / Net Cash Flow, direct method. Master spec §35 gives only the generic textbook
+  categories with no restaurant-specific mapping, so this phase adds two columns to
+  `ChartOfAccount` — `isCashEquivalent` (true only for the seeded Cash/Bank accounts) and
+  `cashFlowCategory` (nullable `OPERATING`/`INVESTING`/`FINANCING`, classifying every other
+  account) — rather than guessing the classification from account name/type at report time. The
+  method walks every posted entry that touches a cash-equivalent account and attributes its exact
+  net cash impact to whichever category the *other* (non-cash) line(s) belong to. This is exact,
+  not a heuristic: every posted entry balances (enforced at posting time by
+  `AccountingService.assertBalanced`), so `sum(non-cash lines' credit − debit)` is identically
+  equal to that entry's net cash inflow/outflow — no proportional guessing, no double-counting. A
+  non-cash line whose account has no `cashFlowCategory` set (a custom account an org added without
+  classifying it) lands in a reported `unclassifiedActivities` bucket rather than being silently
+  dropped. A journal entry that moves money between two cash-equivalent accounts (e.g. a
+  register-to-bank deposit) nets to zero across every category, correctly reflecting that total
+  cash-on-hand didn't change. Reconciliation (master spec Phase 11's explicit "Verify
+  reconciliation" instruction): `netCashFlow` is asserted, in both the integration test suite and
+  a hand-written SQL smoke test, to equal `endingCash − beginningCash` computed independently —
+  see the Known Issues entry below for the smoke test's numbers.
+- `getFinancialDashboard(organizationId, {branchId?})`: master spec §33/§53's financial figures —
+  Today's Revenue, Today's Expenses, Gross Profit, Net Profit, Cash Position, Outstanding
+  Receivables, Outstanding Payables, Inventory Value. §53's own example numbers only reconcile as
+  Revenue − Expenses = Gross Profit (125,450 − 63,200 = 62,250), i.e. "Expenses" there is COGS
+  specifically, with Operating Expenses folded into Net Profit rather than shown as its own card —
+  `todayExpenses` mirrors that (`todayOperatingExpenses` is exposed separately for the full
+  breakdown). "Today" is resolved in the organization's own timezone (`lib/utils/timezone.ts`,
+  master spec §54's date-range presets — today/yesterday/this week/last week/this month/last
+  month/this quarter/this year/custom — same `Intl.DateTimeFormat`-against-an-IANA-zone approach
+  as `ReservationService`'s existing business-hours check, no date library). Outstanding
+  Receivables/Payables/Inventory Value are read by exact account name ("Accounts Receivable" /
+  "Accounts Payable" / "Inventory") — the same not-best-effort, assumes-the-seeded-chart's-names
+  convention `AccountingService`'s automatic-posting methods already use throughout Phase 10; Cash
+  Position is flag-driven (`isCashEquivalent`), not name-driven, so a second cash-equivalent
+  account an org adds later stays correctly included. Master spec §36: "use caching carefully so
+  financial information does not become misleadingly stale... for financial data, correctness is
+  more important than aggressive caching" — honored by simply never caching; every report is
+  computed live on each request.
+- Scope boundary vs. Phase 12 (Owner Analytics), confirmed by reading both phases' own build
+  lists: §34 Sales Analytics (revenue-over-time and by-channel/product/category/branch/hour/day/
+  month charts) and the *operational* counts on §33's Owner Dashboard list (Orders, Reservations,
+  Customers, Catering Events) belong to Phase 12, not this phase — this phase's dashboard sticks
+  to the financial figures only.
+- API routes (all read-only, gated on `FINANCE_VIEW` — no new permission needed, same reuse
+  precedent as Phase 10's own routes): `/api/finance/reports/income-statement`,
+  `/balance-sheet`, `/cash-flow`, `/dashboard`.
+- Dashboard UI: a new "Reports" section in the Finance board (now the board's default landing
+  section, ahead of Chart of Accounts — matching §53's "the first screen should communicate
+  business health immediately") with four tabs (Dashboard, Income Statement, Balance Sheet, Cash
+  Flow), a branch filter, and §54's date-range preset selector (with a custom-range picker) or an
+  as-of-date picker where the report calls for a point in time instead of a range.
+- No seed data changes beyond mirroring the two new `ChartOfAccount` columns in
+  `prisma/seed.ts`'s hand-written chart-of-accounts array — this phase is pure read/aggregation
+  over Phase 10's already-seeded ledger, so the existing demo data already exercises every report.
+- Tests: `lib/utils/timezone.ts`'s date-range presets (verified against hand-computed Asia/Manila
+  boundaries for every preset, including week/month/quarter/year edges) and
+  `lib/validation/reporting.ts`'s schemas at the unit level; at the integration level, Income
+  Statement math against known postings (plus date-range and branch scoping), Balance Sheet's
+  `Assets = Liabilities + Equity + NetIncomeToDate` invariant (including that a `DRAFT` entry
+  doesn't perturb it, and that a branch-scoped balance sheet also balances), Cash Flow's category
+  attribution and its `netCashFlow = endingCash − beginningCash` reconciliation (including the
+  unclassified bucket and the cash-to-cash-transfer-nets-to-zero case), and the dashboard's
+  today-figures and branch scoping.
+
+**Not yet built** (Phases 12–16 per `docs/architecture.md`): owner analytics, AI insights,
+notifications, hardening, deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -1057,6 +1145,40 @@ AI insights, notifications, hardening, deployment.
   explicit `new Map<string, (typeof rows)[number]>()` plus a populate-by-loop — the same shape
   `itemByName`/`categoryByName` already used elsewhere in `seed.ts`. Worth remembering for any
   future phase that reaches for `new Map(x.map(...))` against a Prisma query result.
+
+- **Phase 11 could not execute `ReportingService.ts` itself in this sandbox** (no `node_modules`,
+  no generated Prisma Client — same constraint as every phase). Beyond the usual
+  TS-syntax-only `tsc` check and the Vitest integration suite (also unexecuted here, same as every
+  phase — see the top of this section), this phase's three report-generation formulas (income
+  statement, balance-sheet identity, cash-flow direct method) were additionally re-derived by hand
+  as raw SQL and run for real against a live local Postgres database, in a
+  `BEGIN; ... DO $$ ... $$; ROLLBACK;` smoke test mirroring the same transaction mix as
+  `tests/integration/reporting/reporting-service.test.ts`'s cash-flow test (an owner capital
+  contribution, a Cash/AR-split sale, COGS, rent both on-account and via bank, an equipment
+  purchase, loan proceeds, a cash-to-bank transfer, an intentionally-unclassified custom account,
+  and an unposted `DRAFT` entry). All four checks passed: income statement (revenue 1,000.00, COGS
+  400.00, gross profit 600.00, net profit −9,500.00), balance sheet (assets 505,550.00 = liabilities
+  15,050.00 + equity 500,000.00 + net income −9,500.00), cash flow (operating 600.00, investing
+  −2,000.00, financing 505,000.00, unclassified 50.00, net 503,650.00 = ending cash 503,650.00 −
+  beginning cash 0.00), and confirmation that the `DRAFT` entry's ₱99,999.00 never appears in any
+  aggregate. The migration (`prisma/migrations/20260817010000_phase11_reporting/migration.sql`)
+  adds one enum (`CashFlowCategory`) and two columns to `chart_of_accounts`
+  (`isCashEquivalent`, `cashFlowCategory`) — applied clean to both the dev and test local Postgres
+  databases via the same `/tmp`-copy workaround as every prior phase. The `git stash -u`
+  before/after TypeScript diff (checked out to the pre-Phase-11 commit `71c813e`, re-ran
+  `tsc --noEmit`, popped the stash back) confirmed the same result as every prior phase: baseline
+  was 2,612 diagnostics, after Phase 11 was 2,805 — 193 more, entirely inside
+  already-established categories (`TS7026` +174, `TS7006` +8, `TS2307` +10, `TS2882` +1 — one new
+  `server-only` import in `ReportingService.ts`, the identical pattern every other service file
+  hits). Zero new diagnostic categories. The two pre-existing non-artifact diagnostics (`TS2345`
+  in `app/dashboard/layout.tsx`, `TS18046` in `lib/utils/api-error.ts`) are unchanged. No `TS2322`
+  key-prop diagnostic appeared — the new Reports section's list renders (income statement/balance
+  sheet account rows, cash-flow line items, dashboard cards) all render their `.map()` rows
+  inline, same discipline as every phase since 6. `lib/utils/timezone.ts` has zero diagnostics of
+  its own (a self-contained file with no external imports) — its date-range math was additionally
+  spot-checked by running it directly with `tsx` against concrete Asia/Manila timestamps (not just
+  type-checked), confirming every preset's boundary (week starts Monday, month/quarter/year
+  boundaries) matches hand computation exactly before it was relied on by any report.
 
 ## Required Environment Variables
 

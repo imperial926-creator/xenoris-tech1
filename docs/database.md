@@ -594,6 +594,30 @@ posts Debit `category.defaultAccountId` / Credit Cash-or-Bank (by `paymentMethod
 `journalEntryId`; `rejectExpense` sets `REJECTED` and never touches the ledger. `ExpenseAttachment`:
 `id, expenseId (ON DELETE CASCADE), fileName, fileUrl, uploadedByUserId? (ON DELETE SET NULL)`.
 
+## Phase 11 Schema
+
+No new tables — Phase 11 (Financial Reporting) is pure read/aggregation over Phase 10's ledger
+(`services/reporting/ReportingService.ts`), reading `JournalEntry`/`JournalEntryLine`/
+`ChartOfAccount` directly rather than any new storage. Two columns were added to the existing
+`ChartOfAccount` table (migration `20260817010000_phase11_reporting`):
+
+### ChartOfAccount (additions)
+`isCashEquivalent (Boolean, default false)`, `cashFlowCategory (CashFlowCategory?, nullable)`.
+`CashFlowCategory` enum: `OPERATING, INVESTING, FINANCING`. `isCashEquivalent` is true only for
+the seeded Cash and Bank accounts — it marks which accounts `generateCashFlow` treats as "cash"
+for its direct-method walk and which balances the dashboard's Cash Position figure sums.
+`cashFlowCategory` classifies every other account for when it's the contra side of a cash
+movement; null for cash-equivalent accounts themselves and for any account an org adds without
+classifying it (its cash impact is then reported under `unclassifiedActivities` rather than
+silently dropped — see `docs/architecture.md` § 19). The seeded chart's classification: Accounts
+Receivable/Inventory/Accounts Payable/Customer Deposits/Taxes Payable and every Revenue/COGS/
+Expense account → `OPERATING`; Equipment → `INVESTING`; Loans/Owner's Equity/Retained Earnings →
+`FINANCING`. `AccountingService.createAccount` defaults a new custom account's
+`cashFlowCategory` by type (`EQUITY` → `FINANCING`, everything else → `OPERATING`) unless the
+caller overrides it; `isCashEquivalent` is not settable at creation (an org enables it on an
+existing account via `updateAccount` if it adds a second cash-equivalent account, e.g. a GCash
+wallet).
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their

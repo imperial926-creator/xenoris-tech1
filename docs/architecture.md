@@ -777,3 +777,107 @@ compliance (BIR VAT netting/zero-rating, official-receipt sequencing, withholdin
 master spec §68 is explicit that this architecture must be technically sound but should not assume
 local compliance automatically, and flags exactly these areas for review by a Philippine
 accountant/tax professional before any of this ledger is used for real filings.
+
+## 19. Phase 11 — Financial Reporting
+
+Master spec §35 ("Reports must be generated from the accounting ledger. Do not calculate financial
+statements from UI aggregates."), §36 ("update the relevant dashboard data without requiring
+manual data entry... for financial data, correctness is more important than aggressive caching"),
+§33/§53 (the owner dashboard's financial figures — Today's Revenue, Today's Expenses, Gross
+Profit, Net Profit, Cash Position, Outstanding Receivables, Outstanding Payables, Inventory
+Value), and §54 (every major report supports Today/Yesterday/This week/Last week/This month/Last
+month/This quarter/This year/Custom range, plus a branch filter) define this phase's scope. The
+master spec's own "PHASE 11 — FINANCIAL REPORTING" build list names Income Statement, Balance
+Sheet, Cash Flow, Trial Balance, Account Balances, and Financial Dashboard, plus "verify
+reconciliation" — Trial Balance and Account Balances were already built in Phase 10 (validating
+that phase's own scope call to build them early since proving §49's debits=credits invariant
+needed them) and are reused here unchanged; this phase's real new work is the three financial
+statements, the dashboard, and the reconciliation tests.
+
+**Every report is a live query over the ledger, never a cached or pre-aggregated shortcut.**
+`services/reporting/ReportingService.ts` has no `Order`, `Reservation`, `CateringPayment`, or any
+other business-event table anywhere in it — every method queries posted `JournalEntry`/
+`JournalEntryLine` rows joined to `ChartOfAccount`, computed fresh on every request. This is a
+direct, literal reading of §35's instruction, and it composes with §36's caching guidance the
+simplest way possible: by not caching at all. At this build's data volumes a live aggregation
+query per report request is the honest, correct choice — the same "an honest N+1 (or here, an
+honest live query) is a documented limitation, not a shortcut" discipline Phase 8's
+`segmentBreakdown` and Phase 10's `generateTrialBalance` already established.
+
+**The Balance Sheet's Equity section has to include unclosed net income, or it simply wouldn't
+balance — this is a real accounting consequence of a design decision made back in Phase 10, not
+an approximation invented this phase.** `AccountingPeriod.close` (Phase 10) only blocks further
+postings into a closed period; nothing in this build ever generates a closing journal entry that
+zeroes Revenue/COGS/Expense account balances into Retained Earnings at period-end (real
+double-entry systems do this at fiscal year-end). Because of that, Revenue/COGS/Expense balances
+simply accumulate on the ledger forever, which means `Assets = Liabilities + Equity(recorded)` is
+mathematically guaranteed to be *false* the moment any revenue or expense has ever posted — the
+missing piece is exactly the cumulative net income those accounts represent. `generateBalanceSheet`
+computes that cumulative net income (Revenue − COGS − Expense, from inception through `asOfDate`,
+via the same account-aggregation helper the Income Statement uses) and folds it into the reported
+Equity total. This isn't a workaround — every posted entry balances individually (enforced at
+posting time), so summing every account's signed normal-balance amount across the *entire* ledger
+through any date is identically zero, and that sum is precisely
+`Assets − Liabilities − Equity(recorded) − NetIncomeToDate`. The identity therefore holds for any
+subset of *whole* journal entries too, not just the full ledger — including a single branch's,
+since every entry's `branchId` is uniform across all its lines by construction (a branch-scoped
+filter never splits an entry in half). `tests/integration/reporting/reporting-service.test.ts`
+proves this for an arbitrary transaction mix, including that an unposted `DRAFT` entry (which
+should never be counted) doesn't perturb it, and that a branch-scoped balance sheet balances too.
+
+**Cash Flow's three categories have no restaurant-specific mapping anywhere in the master spec, so
+this phase makes that mapping an explicit, auditable part of the schema rather than an inferred
+guess.** Two columns were added to `ChartOfAccount`: `isCashEquivalent` (a boolean, true only for
+the seeded Cash and Bank accounts) and `cashFlowCategory` (a nullable `OPERATING`/`INVESTING`/
+`FINANCING` enum, classifying every other account for when it's the *contra* side of a cash
+movement). The seeded chart classifies Accounts Receivable/Inventory/Accounts Payable/Customer
+Deposits/Taxes Payable and every Revenue/COGS/Expense account as `OPERATING` (the working-capital
+and income-statement side of the business), Equipment as `INVESTING` (a fixed-asset purchase), and
+Loans/Owner's Equity/Retained Earnings as `FINANCING` (the two unambiguous capital-structure
+accounts). `generateCashFlow` implements the *direct* method: it finds every posted entry in the
+date range that touches a cash-equivalent account, and for each one sums the non-cash lines'
+`credit − debit`, grouped by `cashFlowCategory`. This is exact, not approximate — every posted
+entry balances (enforced by `AccountingService.assertBalanced` at posting time), so
+`sum(all lines' debit − credit) = 0` for any single entry, which means
+`sum(non-cash lines' credit − debit) = sum(cash lines' debit − credit)` *exactly* — the entry's
+real net cash impact, with zero rounding and zero proportional guessing, fully explained by
+grouping its non-cash lines. A custom account an org adds later without setting a
+`cashFlowCategory` still shows up, in a reported `unclassifiedActivities` bucket, rather than
+silently vanishing from the statement — matching the "no silent caps" precedent this build already
+applies to `generateTrialBalance`'s own `isBalanced` check. An entry that moves money between two
+cash-equivalent accounts (e.g. a till-to-bank deposit) has both its lines skipped as "cash," so it
+contributes nothing to any category — correctly, since total cash-on-hand across all
+cash-equivalent accounts together doesn't change. Reconciliation (the master spec's explicit
+"Verify reconciliation" instruction): `netCashFlow` (the sum of all four buckets, including
+unclassified) is proven, in both the Vitest integration suite and a hand-written SQL smoke test
+run directly against Postgres (this sandbox cannot execute `ReportingService.ts` itself — see
+CLAUDE.md → Known Issues), to equal `endingCash − beginningCash`, computed completely
+independently via the same account-balance aggregation the Balance Sheet uses, restricted to just
+the cash-equivalent accounts.
+
+**Scope boundary vs. Phase 12, confirmed by reading both phases' own build lists before writing
+either dashboard.** §33's Owner Dashboard example mixes financial figures (Today's Revenue/
+Expenses/Gross Profit/Net Profit/Cash Position/Outstanding Receivables/Outstanding Payables/
+Inventory Value) with operational counts (Orders, Reservations, Customers, Catering Events) in one
+mockup, and §34's Sales Analytics adds a further layer of by-channel/product/category/branch/hour/
+day/month charts on top — but the master spec's own "PHASE 12 — OWNER ANALYTICS" build list
+("Revenue dashboard, Profit dashboard, Customer analytics, Product analytics, Channel analytics,
+Inventory analytics, Operational analytics") claims the operational-count and charting half of that
+mockup for Phase 12, while "PHASE 11 — FINANCIAL REPORTING" claims only the ledger-derived
+financial figures. `getFinancialDashboard` therefore returns exactly the financial subset — the
+counts and charts are Phase 12's job, reading from `Order`/`Reservation`/`Customer`/`CateringEvent`
+directly rather than from the accounting ledger, since those are genuinely operational metrics, not
+financial ones.
+
+Permissions: no new grant needed — every Phase 11 route is read-only and gates on the existing
+`FINANCE_VIEW` permission, the same reuse precedent Phase 10 established for its own routes.
+
+API routes: `/api/finance/reports/income-statement`, `/balance-sheet`, `/cash-flow`, `/dashboard`
+— all `GET`, all org-scoped via the session, with an optional `branchId` filter.
+
+Scope boundary, stated plainly: this phase adds no new tables, only two columns to
+`ChartOfAccount`. Every method in `ReportingService` is pure read/aggregation over the ledger
+Phase 10 built — nothing here writes a journal entry, and nothing here reads a business-event
+table directly. Owner analytics (revenue/profit/customer/product/channel/inventory/operational
+dashboards, all driven by business-event tables rather than the ledger) are Phase 12's job per its
+own separate build list.
