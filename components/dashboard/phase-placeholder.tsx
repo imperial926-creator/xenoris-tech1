@@ -11,7 +11,10 @@ export function PhasePlaceholder({
   description,
 }: {
   title: string;
-  phase: number;
+  // A number for a module tracked to a specific build phase; null when the
+  // feature (e.g. master spec §55's exports) was never assigned to one of
+  // the phases in docs/architecture.md's build order.
+  phase: number | null;
   description: string;
 }) {
   return (
@@ -19,7 +22,7 @@ export function PhasePlaceholder({
       <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
       <Card className="border-dashed">
         <CardHeader>
-          <CardTitle className="text-base">Coming in Phase {phase}</CardTitle>
+          <CardTitle className="text-base">{phase === null ? 'Not yet scheduled' : `Coming in Phase ${phase}`}</CardTitle>
           <CardDescription>{description}</CardDescription>
         </CardHeader>
         <CardContent>

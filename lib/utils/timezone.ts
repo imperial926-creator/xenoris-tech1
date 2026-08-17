@@ -3,7 +3,8 @@
  * (Income Statement / Cash Flow date ranges, the dashboard's "Today") and
  * their report-filter presets (master spec §54: Today, Yesterday, This
  * week, Last week, This month, Last month, This quarter, This year, Custom
- * date range).
+ * date range), plus Phase 12's analytics trend bucketing (day/week/month
+ * buckets for the Revenue/Profit dashboards).
  *
  * Built on `Intl.DateTimeFormat` against an IANA timezone string, not a
  * date library — same reason as ReservationService's dayKeyInTimezone/
@@ -11,9 +12,10 @@
  * but this build environment cannot run `npm install`, so anything on the
  * request path avoids depending on code that has never actually been
  * resolved (see CLAUDE.md → Known Issues). Every branch/organization in
- * this build defaults its timezone to 'Asia/Manila' (no DST, so the single-
- * iteration offset calculation below is exact for the default case, and a
- * reasonable practical approximation for any other IANA zone).
+ * this build defaults its timezone to 'Asia/Manila' (no DST, so every
+ * "add exactly 24h" step below is exact for the default case, and a
+ * reasonable practical approximation for any other IANA zone that does
+ * observe DST).
  */
 
 type DateParts = { year: number; month: number; day: number; hour: number; minute: number; second: number };
@@ -53,23 +55,36 @@ function getTimezoneOffsetMinutes(instant: Date, timezone: string): number {
   return (asUTC - instant.getTime()) / 60000;
 }
 
-/** The UTC instant corresponding to 00:00:00.000 local time, in `timezone`, on the calendar date `date` falls on in that zone. */
-export function startOfDayInTimezone(date: Date, timezone: string): Date {
-  const p = getDatePartsInTimezone(date, timezone);
-  const guess = new Date(Date.UTC(p.year, p.month - 1, p.day, 0, 0, 0, 0));
+/**
+ * The UTC instant for 00:00:00.000 local time on an explicit local
+ * calendar date (year/month/day, not derived from formatting an
+ * intermediate proxy `Date`). This is the one primitive every "start of
+ * day/week/month/quarter/year" helper below is built from — constructing a
+ * calendar date directly here (rather than building a `Date.UTC(...)`
+ * proxy for some *other* day and then re-formatting it through the zone to
+ * "discover" its local date) matters for timezones west of UTC: a naive
+ * `new Date(Date.UTC(year, month - 1, 1))` proxy for "the 1st of the
+ * month" can format to the *last day of the previous month* once
+ * re-interpreted in a west-of-UTC zone, silently corrupting month/quarter/
+ * year boundaries. Every caller below supplies year/month/day it already
+ * knows are correct (from `getDatePartsInTimezone` on a real instant, or
+ * from its own calendar arithmetic), so that failure mode can't occur here.
+ */
+function startOfLocalDateInTimezone(year: number, month: number, day: number, timezone: string): Date {
+  const guess = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
   const offsetMinutes = getTimezoneOffsetMinutes(guess, timezone);
   return new Date(guess.getTime() - offsetMinutes * 60000);
 }
 
-/** The UTC instant corresponding to 23:59:59.999 local time, in `timezone`, on the calendar date `date` falls on in that zone. */
-export function endOfDayInTimezone(date: Date, timezone: string): Date {
-  const nextDay = new Date(date.getTime() + 24 * 60 * 60 * 1000);
-  const nextDayStart = startOfDayInTimezone(nextDay, timezone);
-  return new Date(nextDayStart.getTime() - 1);
+/** The UTC instant corresponding to 00:00:00.000 local time, in `timezone`, on the calendar date `date` falls on in that zone. */
+export function startOfDayInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  return startOfLocalDateInTimezone(p.year, p.month, p.day, timezone);
 }
 
-function addDaysUTC(date: Date, days: number): Date {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+/** The UTC instant corresponding to 23:59:59.999 local time, in `timezone`, on the calendar date `date` falls on in that zone. */
+export function endOfDayInTimezone(date: Date, timezone: string): Date {
+  return new Date(startOfDayInTimezone(date, timezone).getTime() + 24 * 60 * 60 * 1000 - 1);
 }
 
 /** Monday-start day-of-week index (0 = Monday .. 6 = Sunday) for `date` as observed in `timezone`. */
@@ -78,6 +93,80 @@ function isoWeekdayInTimezone(date: Date, timezone: string): number {
   const order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const idx = order.indexOf(weekday);
   return idx === -1 ? 0 : idx;
+}
+
+/** Start of the Monday-based week (00:00 local) containing `date`. */
+export function startOfWeekInTimezone(date: Date, timezone: string): Date {
+  const weekday = isoWeekdayInTimezone(date, timezone);
+  const todayStart = startOfDayInTimezone(date, timezone);
+  return new Date(todayStart.getTime() - weekday * 24 * 60 * 60 * 1000);
+}
+
+/** End of the Monday-based week (23:59:59.999 local) containing `date`. */
+export function endOfWeekInTimezone(date: Date, timezone: string): Date {
+  return new Date(startOfWeekInTimezone(date, timezone).getTime() + 7 * 24 * 60 * 60 * 1000 - 1);
+}
+
+/** Start of the calendar month (00:00 local, day 1) containing `date`. */
+export function startOfMonthInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  return startOfLocalDateInTimezone(p.year, p.month, 1, timezone);
+}
+
+function startOfNextMonthInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  return p.month === 12
+    ? startOfLocalDateInTimezone(p.year + 1, 1, 1, timezone)
+    : startOfLocalDateInTimezone(p.year, p.month + 1, 1, timezone);
+}
+
+/** End of the calendar month (23:59:59.999 local, last day) containing `date`. */
+export function endOfMonthInTimezone(date: Date, timezone: string): Date {
+  return new Date(startOfNextMonthInTimezone(date, timezone).getTime() - 1);
+}
+
+/** Start of the calendar quarter (Jan/Apr/Jul/Oct 1, 00:00 local) containing `date`. */
+export function startOfQuarterInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  const quarterStartMonth = Math.floor((p.month - 1) / 3) * 3 + 1; // 1-indexed
+  return startOfLocalDateInTimezone(p.year, quarterStartMonth, 1, timezone);
+}
+
+function startOfNextQuarterInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  const quarterStartMonth = Math.floor((p.month - 1) / 3) * 3 + 1;
+  const nextQuarterStartMonth = quarterStartMonth + 3;
+  return nextQuarterStartMonth > 12
+    ? startOfLocalDateInTimezone(p.year + 1, nextQuarterStartMonth - 12, 1, timezone)
+    : startOfLocalDateInTimezone(p.year, nextQuarterStartMonth, 1, timezone);
+}
+
+/** End of the calendar quarter (23:59:59.999 local, last day) containing `date`. */
+export function endOfQuarterInTimezone(date: Date, timezone: string): Date {
+  return new Date(startOfNextQuarterInTimezone(date, timezone).getTime() - 1);
+}
+
+/** Start of the calendar year (Jan 1, 00:00 local) containing `date`. */
+export function startOfYearInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  return startOfLocalDateInTimezone(p.year, 1, 1, timezone);
+}
+
+/** End of the calendar year (23:59:59.999 local, Dec 31) containing `date`. */
+export function endOfYearInTimezone(date: Date, timezone: string): Date {
+  const p = getDatePartsInTimezone(date, timezone);
+  return new Date(startOfLocalDateInTimezone(p.year + 1, 1, 1, timezone).getTime() - 1);
+}
+
+/**
+ * "YYYY-MM-DD" grouping key for `date`'s local calendar day in `timezone`
+ * — used by Phase 12's analytics trend bucketing (AnalyticsService) to
+ * group raw rows into day buckets without a second round of Date algebra
+ * per row.
+ */
+export function dateKeyInTimezone(date: Date, timezone: string): string {
+  const p = getDatePartsInTimezone(date, timezone);
+  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
 export const DATE_RANGE_PRESETS = [
@@ -115,49 +204,28 @@ export function resolveDateRangePreset(
       return { startDate: startOfDayInTimezone(now, timezone), endDate: endOfDayInTimezone(now, timezone) };
     }
     case 'yesterday': {
-      const y = addDaysUTC(now, -1);
+      const y = new Date(startOfDayInTimezone(now, timezone).getTime() - 24 * 60 * 60 * 1000);
       return { startDate: startOfDayInTimezone(y, timezone), endDate: endOfDayInTimezone(y, timezone) };
     }
     case 'this_week': {
-      const weekday = isoWeekdayInTimezone(now, timezone); // 0 = Monday
-      const monday = addDaysUTC(now, -weekday);
-      const sunday = addDaysUTC(monday, 6);
-      return { startDate: startOfDayInTimezone(monday, timezone), endDate: endOfDayInTimezone(sunday, timezone) };
+      return { startDate: startOfWeekInTimezone(now, timezone), endDate: endOfWeekInTimezone(now, timezone) };
     }
     case 'last_week': {
-      const weekday = isoWeekdayInTimezone(now, timezone);
-      const thisMonday = addDaysUTC(now, -weekday);
-      const lastMonday = addDaysUTC(thisMonday, -7);
-      const lastSunday = addDaysUTC(lastMonday, 6);
-      return { startDate: startOfDayInTimezone(lastMonday, timezone), endDate: endOfDayInTimezone(lastSunday, timezone) };
+      const lastWeekAnchor = new Date(startOfWeekInTimezone(now, timezone).getTime() - 24 * 60 * 60 * 1000);
+      return { startDate: startOfWeekInTimezone(lastWeekAnchor, timezone), endDate: endOfWeekInTimezone(lastWeekAnchor, timezone) };
     }
     case 'this_month': {
-      const p = getDatePartsInTimezone(now, timezone);
-      const monthStart = new Date(Date.UTC(p.year, p.month - 1, 1));
-      const monthEndExclusive = new Date(Date.UTC(p.year, p.month, 1));
-      const lastDayOfMonth = addDaysUTC(monthEndExclusive, -1);
-      return { startDate: startOfDayInTimezone(monthStart, timezone), endDate: endOfDayInTimezone(lastDayOfMonth, timezone) };
+      return { startDate: startOfMonthInTimezone(now, timezone), endDate: endOfMonthInTimezone(now, timezone) };
     }
     case 'last_month': {
-      const p = getDatePartsInTimezone(now, timezone);
-      const prevMonthStart = new Date(Date.UTC(p.year, p.month - 2, 1));
-      const thisMonthStart = new Date(Date.UTC(p.year, p.month - 1, 1));
-      const lastDayOfPrevMonth = addDaysUTC(thisMonthStart, -1);
-      return { startDate: startOfDayInTimezone(prevMonthStart, timezone), endDate: endOfDayInTimezone(lastDayOfPrevMonth, timezone) };
+      const lastMonthAnchor = new Date(startOfMonthInTimezone(now, timezone).getTime() - 24 * 60 * 60 * 1000);
+      return { startDate: startOfMonthInTimezone(lastMonthAnchor, timezone), endDate: endOfMonthInTimezone(lastMonthAnchor, timezone) };
     }
     case 'this_quarter': {
-      const p = getDatePartsInTimezone(now, timezone);
-      const quarterStartMonth = Math.floor((p.month - 1) / 3) * 3; // 0-indexed
-      const quarterStart = new Date(Date.UTC(p.year, quarterStartMonth, 1));
-      const quarterEndExclusive = new Date(Date.UTC(p.year, quarterStartMonth + 3, 1));
-      const lastDayOfQuarter = addDaysUTC(quarterEndExclusive, -1);
-      return { startDate: startOfDayInTimezone(quarterStart, timezone), endDate: endOfDayInTimezone(lastDayOfQuarter, timezone) };
+      return { startDate: startOfQuarterInTimezone(now, timezone), endDate: endOfQuarterInTimezone(now, timezone) };
     }
     case 'this_year': {
-      const p = getDatePartsInTimezone(now, timezone);
-      const yearStart = new Date(Date.UTC(p.year, 0, 1));
-      const yearEnd = new Date(Date.UTC(p.year, 11, 31));
-      return { startDate: startOfDayInTimezone(yearStart, timezone), endDate: endOfDayInTimezone(yearEnd, timezone) };
+      return { startDate: startOfYearInTimezone(now, timezone), endDate: endOfYearInTimezone(now, timezone) };
     }
     case 'custom': {
       if (!customStart || !customEnd) {
