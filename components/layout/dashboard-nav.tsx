@@ -39,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   // read as "coming soon in a phase already marked done."
   { href: '/dashboard/reports', label: 'Exports', phase: 'unscheduled' },
   { href: '/dashboard/analytics', label: 'Analytics', phase: null },
+  { href: '/dashboard/ai-insights', label: 'AI Insights', phase: null },
   { href: '/dashboard/settings', label: 'Settings', phase: null },
 ];
 
