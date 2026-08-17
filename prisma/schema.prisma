@@ -2181,6 +2181,18 @@ enum DebitCredit {
   CREDIT
 }
 
+// Phase 11 — classifies a non-cash account for the Cash Flow Statement's
+// direct method (see ReportingService.generateCashFlow's file-header
+// comment for the full reasoning). Master spec §35 gives only the generic
+// textbook categories with no restaurant-specific mapping, so this build
+// stores the classification explicitly on the chart rather than guessing
+// it from account type/name at report time.
+enum CashFlowCategory {
+  OPERATING
+  INVESTING
+  FINANCING
+}
+
 model ChartOfAccount {
   id             String      @id @default(cuid())
   organizationId String
@@ -2204,6 +2216,19 @@ model ChartOfAccount {
   // "part of the standard chart" from an org's own custom accounts.
   isSystem       Boolean     @default(true)
   active         Boolean     @default(true)
+  // Phase 11 — true only for the accounts that actually represent cash on
+  // hand or in the bank (the seeded chart's Cash/Bank accounts). Marks
+  // which accounts generateCashFlow treats as "cash" for its direct-method
+  // walk and for the dashboard's Cash Position figure — deliberately a
+  // flag rather than an inferred "name contains 'Cash'" check, since a
+  // custom account an org adds later has no name convention to rely on.
+  isCashEquivalent  Boolean            @default(false)
+  // Phase 11 — which of the Cash Flow Statement's three activity buckets
+  // this account's postings belong to when they're the *contra* side of a
+  // cash movement. Null for cash-equivalent accounts themselves (they
+  // don't classify against themselves) and for accounts that never touch
+  // cash directly. See ReportingService.generateCashFlow.
+  cashFlowCategory  CashFlowCategory?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 

@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const ACCOUNT_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'COGS', 'EXPENSE'] as const;
 export const DEBIT_CREDIT = ['DEBIT', 'CREDIT'] as const;
+// Phase 11 — see ChartOfAccount.cashFlowCategory in schema.prisma.
+export const CASH_FLOW_CATEGORIES = ['OPERATING', 'INVESTING', 'FINANCING'] as const;
 export const ACCOUNTING_PERIOD_STATUSES = ['OPEN', 'CLOSED'] as const;
 export const JOURNAL_ENTRY_STATUSES = ['DRAFT', 'POSTED', 'REVERSED'] as const;
 export const EXPENSE_APPROVAL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
@@ -31,6 +33,10 @@ export const createAccountSchema = z.object({
   name: z.string().trim().min(1).max(150),
   type: z.enum(ACCOUNT_TYPES),
   description: z.string().trim().max(500).optional(),
+  // Optional override — AccountingService.createAccount falls back to a
+  // sensible per-type default (see DEFAULT_CASH_FLOW_CATEGORY_BY_TYPE) when
+  // omitted. Not exposed: isCashEquivalent — see createAccount's comment.
+  cashFlowCategory: z.enum(CASH_FLOW_CATEGORIES).optional(),
 });
 export type CreateAccountInput = z.infer<typeof createAccountSchema>;
 
@@ -38,6 +44,8 @@ export const updateAccountSchema = z.object({
   name: z.string().trim().min(1).max(150).optional(),
   description: z.string().trim().max(500).optional(),
   active: z.boolean().optional(),
+  cashFlowCategory: z.enum(CASH_FLOW_CATEGORIES).nullable().optional(),
+  isCashEquivalent: z.boolean().optional(),
 });
 export type UpdateAccountInput = z.infer<typeof updateAccountSchema>;
 

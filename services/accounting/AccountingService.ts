@@ -1,6 +1,6 @@
 import 'server-only';
 import { Prisma, type PrismaClient } from '@prisma/client';
-import type { AccountType, DebitCredit, FinancialTransactionType } from '@prisma/client';
+import type { AccountType, DebitCredit, FinancialTransactionType, CashFlowCategory } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
@@ -46,39 +46,63 @@ const NORMAL_BALANCE_BY_TYPE: Record<AccountType, DebitCredit> = {
   EXPENSE: 'DEBIT',
 };
 
-const DEFAULT_CHART_OF_ACCOUNTS: ReadonlyArray<{ code: string; name: string; type: AccountType }> = [
-  { code: '1000', name: 'Cash', type: 'ASSET' },
-  { code: '1010', name: 'Bank', type: 'ASSET' },
-  { code: '1100', name: 'Accounts Receivable', type: 'ASSET' },
-  { code: '1200', name: 'Inventory', type: 'ASSET' },
-  { code: '1300', name: 'Equipment', type: 'ASSET' },
-  { code: '2000', name: 'Accounts Payable', type: 'LIABILITY' },
-  { code: '2100', name: 'Customer Deposits', type: 'LIABILITY' },
-  { code: '2200', name: 'Taxes Payable', type: 'LIABILITY' },
-  { code: '2300', name: 'Loans', type: 'LIABILITY' },
-  { code: '3000', name: "Owner's Equity", type: 'EQUITY' },
-  { code: '3100', name: 'Retained Earnings', type: 'EQUITY' },
-  { code: '4000', name: 'Dine-in Revenue', type: 'REVENUE' },
-  { code: '4010', name: 'Take-out Revenue', type: 'REVENUE' },
-  { code: '4020', name: 'Delivery Revenue', type: 'REVENUE' },
-  { code: '4030', name: 'Catering Revenue', type: 'REVENUE' },
-  { code: '4090', name: 'Other Revenue', type: 'REVENUE' },
-  { code: '5000', name: 'Food Cost', type: 'COGS' },
-  { code: '5010', name: 'Beverage Cost', type: 'COGS' },
-  { code: '5020', name: 'Packaging', type: 'COGS' },
-  { code: '5030', name: 'Catering Cost', type: 'COGS' },
-  { code: '5040', name: 'Delivery Cost', type: 'COGS' },
-  { code: '6000', name: 'Payroll', type: 'EXPENSE' },
-  { code: '6010', name: 'Rent', type: 'EXPENSE' },
-  { code: '6020', name: 'Utilities', type: 'EXPENSE' },
-  { code: '6030', name: 'Marketing', type: 'EXPENSE' },
-  { code: '6040', name: 'Insurance', type: 'EXPENSE' },
-  { code: '6050', name: 'Repairs', type: 'EXPENSE' },
-  { code: '6060', name: 'Transportation', type: 'EXPENSE' },
-  { code: '6070', name: 'Software', type: 'EXPENSE' },
-  { code: '6080', name: 'Waste', type: 'EXPENSE' },
-  { code: '6090', name: 'Other Expenses', type: 'EXPENSE' },
+// Phase 11 — cashFlowCategory classifies each account for
+// generateCashFlow's direct method (see that method's file-header comment
+// for the full reasoning). isCashEquivalent marks the two accounts that
+// ARE cash — they get no category of their own since a cash account never
+// classifies against itself. Every other account defaults to OPERATING
+// (the working-capital/income-statement accounts every automatic posting
+// in this build actually touches) except Equipment (a fixed-asset
+// purchase is Investing) and the two capital accounts (Financing).
+type ChartOfAccountSeed = { code: string; name: string; type: AccountType; isCashEquivalent?: boolean; cashFlowCategory?: CashFlowCategory };
+
+const DEFAULT_CHART_OF_ACCOUNTS: ReadonlyArray<ChartOfAccountSeed> = [
+  { code: '1000', name: 'Cash', type: 'ASSET', isCashEquivalent: true },
+  { code: '1010', name: 'Bank', type: 'ASSET', isCashEquivalent: true },
+  { code: '1100', name: 'Accounts Receivable', type: 'ASSET', cashFlowCategory: 'OPERATING' },
+  { code: '1200', name: 'Inventory', type: 'ASSET', cashFlowCategory: 'OPERATING' },
+  { code: '1300', name: 'Equipment', type: 'ASSET', cashFlowCategory: 'INVESTING' },
+  { code: '2000', name: 'Accounts Payable', type: 'LIABILITY', cashFlowCategory: 'OPERATING' },
+  { code: '2100', name: 'Customer Deposits', type: 'LIABILITY', cashFlowCategory: 'OPERATING' },
+  { code: '2200', name: 'Taxes Payable', type: 'LIABILITY', cashFlowCategory: 'OPERATING' },
+  { code: '2300', name: 'Loans', type: 'LIABILITY', cashFlowCategory: 'FINANCING' },
+  { code: '3000', name: "Owner's Equity", type: 'EQUITY', cashFlowCategory: 'FINANCING' },
+  { code: '3100', name: 'Retained Earnings', type: 'EQUITY', cashFlowCategory: 'FINANCING' },
+  { code: '4000', name: 'Dine-in Revenue', type: 'REVENUE', cashFlowCategory: 'OPERATING' },
+  { code: '4010', name: 'Take-out Revenue', type: 'REVENUE', cashFlowCategory: 'OPERATING' },
+  { code: '4020', name: 'Delivery Revenue', type: 'REVENUE', cashFlowCategory: 'OPERATING' },
+  { code: '4030', name: 'Catering Revenue', type: 'REVENUE', cashFlowCategory: 'OPERATING' },
+  { code: '4090', name: 'Other Revenue', type: 'REVENUE', cashFlowCategory: 'OPERATING' },
+  { code: '5000', name: 'Food Cost', type: 'COGS', cashFlowCategory: 'OPERATING' },
+  { code: '5010', name: 'Beverage Cost', type: 'COGS', cashFlowCategory: 'OPERATING' },
+  { code: '5020', name: 'Packaging', type: 'COGS', cashFlowCategory: 'OPERATING' },
+  { code: '5030', name: 'Catering Cost', type: 'COGS', cashFlowCategory: 'OPERATING' },
+  { code: '5040', name: 'Delivery Cost', type: 'COGS', cashFlowCategory: 'OPERATING' },
+  { code: '6000', name: 'Payroll', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6010', name: 'Rent', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6020', name: 'Utilities', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6030', name: 'Marketing', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6040', name: 'Insurance', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6050', name: 'Repairs', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6060', name: 'Transportation', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6070', name: 'Software', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6080', name: 'Waste', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
+  { code: '6090', name: 'Other Expenses', type: 'EXPENSE', cashFlowCategory: 'OPERATING' },
 ];
+
+// Phase 11 — default cashFlowCategory for an account an org creates itself
+// via createAccount (no Equipment/Loans-style special case possible from
+// type alone, so EQUITY defaults to Financing — the only type where that's
+// unambiguous — and everything else defaults to Operating, overridable via
+// input.cashFlowCategory for e.g. a custom fixed-asset account).
+const DEFAULT_CASH_FLOW_CATEGORY_BY_TYPE: Record<AccountType, CashFlowCategory> = {
+  ASSET: 'OPERATING',
+  LIABILITY: 'OPERATING',
+  EQUITY: 'FINANCING',
+  REVENUE: 'OPERATING',
+  COGS: 'OPERATING',
+  EXPENSE: 'OPERATING',
+};
 
 type LedgerLine = { accountId: string; debit?: Prisma.Decimal | string | number; credit?: Prisma.Decimal | string | number; description?: string };
 
@@ -105,6 +129,8 @@ export class AccountingService {
         name: a.name,
         type: a.type,
         normalBalance: NORMAL_BALANCE_BY_TYPE[a.type],
+        isCashEquivalent: a.isCashEquivalent ?? false,
+        cashFlowCategory: a.cashFlowCategory ?? null,
       })),
     });
   }
@@ -131,6 +157,13 @@ export class AccountingService {
           normalBalance: NORMAL_BALANCE_BY_TYPE[input.type],
           description: input.description,
           isSystem: false,
+          // A brand-new custom account is never itself a cash account (an
+          // org that actually wants a second cash-equivalent account, e.g.
+          // a GCash wallet, edits isCashEquivalent via updateAccount after
+          // creation — kept out of createAccount's input to avoid two
+          // fields fighting over the same "is this cash?" question).
+          isCashEquivalent: false,
+          cashFlowCategory: input.cashFlowCategory ?? DEFAULT_CASH_FLOW_CATEGORY_BY_TYPE[input.type],
         },
       });
       await writeAuditLog(tx, {
