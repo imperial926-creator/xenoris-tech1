@@ -92,11 +92,87 @@ interface TrialBalance {
   isBalanced: boolean;
 }
 
+// Phase 11 — financial reporting types, mirroring ReportingService's return
+// shapes verbatim (Prisma.Decimal serializes to a plain numeric string over
+// JSON, same as every other money field in this file).
+interface AccountLineTotal {
+  accountId: string;
+  code: string;
+  name: string;
+  type: string;
+  amount: string;
+}
+interface IncomeStatement {
+  startDate: string;
+  endDate: string;
+  branchId: string | null;
+  revenue: { accounts: AccountLineTotal[]; total: string };
+  cogs: { accounts: AccountLineTotal[]; total: string };
+  grossProfit: string;
+  operatingExpenses: { accounts: AccountLineTotal[]; total: string };
+  netProfit: string;
+}
+interface BalanceSheet {
+  asOfDate: string;
+  branchId: string | null;
+  assets: { accounts: AccountLineTotal[]; total: string };
+  liabilities: { accounts: AccountLineTotal[]; total: string };
+  equity: { accounts: AccountLineTotal[]; recordedTotal: string; netIncomeToDate: string; total: string };
+  totalLiabilitiesAndEquity: string;
+  isBalanced: boolean;
+}
+interface CashFlow {
+  startDate: string;
+  endDate: string;
+  branchId: string | null;
+  operatingActivities: string;
+  investingActivities: string;
+  financingActivities: string;
+  unclassifiedActivities: string;
+  netCashFlow: string;
+  beginningCash: string;
+  endingCash: string;
+  isReconciled: boolean;
+}
+interface FinancialDashboard {
+  date: string;
+  branchId: string | null;
+  todayRevenue: string;
+  todayExpenses: string;
+  todayOperatingExpenses: string;
+  grossProfit: string;
+  netProfit: string;
+  cashPosition: string;
+  outstandingReceivables: string;
+  outstandingPayables: string;
+  inventoryValue: string;
+}
+
+const DATE_RANGE_PRESETS = [
+  { key: 'today', label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'this_week', label: 'This week' },
+  { key: 'last_week', label: 'Last week' },
+  { key: 'this_month', label: 'This month' },
+  { key: 'last_month', label: 'Last month' },
+  { key: 'this_quarter', label: 'This quarter' },
+  { key: 'this_year', label: 'This year' },
+  { key: 'custom', label: 'Custom range' },
+] as const;
+
+function formatMoney(value: string | undefined): string {
+  if (value === undefined) return '—';
+  const n = Number(value);
+  const abs = Math.abs(n).toFixed(2);
+  return n < 0 ? `-₱${abs}` : `₱${abs}`;
+}
+
 const ACCOUNT_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'COGS', 'EXPENSE'] as const;
 const EXPENSE_PAYMENT_METHODS = ['CASH', 'CARD', 'GCASH', 'MAYA', 'BANK_TRANSFER', 'OTHER'] as const;
 
-type SectionKey = 'accounts' | 'journal' | 'trial-balance' | 'periods' | 'expenses';
+type SectionKey = 'reports' | 'accounts' | 'journal' | 'trial-balance' | 'periods' | 'expenses';
 const SECTIONS: { key: SectionKey; label: string }[] = [
+  { key: 'reports', label: 'Reports' },
   { key: 'accounts', label: 'Chart of Accounts' },
   { key: 'journal', label: 'Journal Entries' },
   { key: 'trial-balance', label: 'Trial Balance' },
@@ -117,7 +193,7 @@ const STATUS_BADGE: Record<string, string> = {
 
 export function FinanceBoard({ branches }: { branches: Branch[] }) {
   const [branchId, setBranchId] = useState(branches[0]?.id ?? '');
-  const [section, setSection] = useState<SectionKey>('accounts');
+  const [section, setSection] = useState<SectionKey>('reports');
   const [error, setError] = useState<string | null>(null);
 
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -194,6 +270,7 @@ export function FinanceBoard({ branches }: { branches: Branch[] }) {
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
+      {section === 'reports' && <ReportsSection branches={branches} />}
       {section === 'accounts' && <AccountsSection accounts={accounts} onChange={() => load(branchId)} />}
       {section === 'journal' && (
         <JournalSection accounts={accounts} journalEntries={journalEntries} branches={branches} branchId={branchId} onChange={() => load(branchId)} />
@@ -212,6 +289,300 @@ export function FinanceBoard({ branches }: { branches: Branch[] }) {
         />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Financial reports (Phase 11) — dashboard, income statement, balance
+// sheet, cash flow. Master spec §54's report filters (date-range preset +
+// branch); §36's "correctness over aggressive caching" is honored simply
+// by refetching on every filter change rather than caching client-side.
+// ---------------------------------------------------------------------------
+
+type ReportTab = 'dashboard' | 'income-statement' | 'balance-sheet' | 'cash-flow';
+const REPORT_TABS: { key: ReportTab; label: string }[] = [
+  { key: 'dashboard', label: 'Dashboard' },
+  { key: 'income-statement', label: 'Income Statement' },
+  { key: 'balance-sheet', label: 'Balance Sheet' },
+  { key: 'cash-flow', label: 'Cash Flow' },
+];
+
+function ReportsSection({ branches }: { branches: Branch[] }) {
+  const [tab, setTab] = useState<ReportTab>('dashboard');
+  const [reportBranchId, setReportBranchId] = useState('');
+  const [preset, setPreset] = useState<(typeof DATE_RANGE_PRESETS)[number]['key']>('this_month');
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
+  const [asOfDate, setAsOfDate] = useState('');
+
+  const [dashboard, setDashboard] = useState<FinancialDashboard | null>(null);
+  const [incomeStatement, setIncomeStatement] = useState<IncomeStatement | null>(null);
+  const [balanceSheet, setBalanceSheet] = useState<BalanceSheet | null>(null);
+  const [cashFlow, setCashFlow] = useState<CashFlow | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const rangeParams = useCallback(() => {
+    const params = new URLSearchParams({ preset });
+    if (reportBranchId) params.set('branchId', reportBranchId);
+    if (preset === 'custom') {
+      if (customStart) params.set('startDate', customStart);
+      if (customEnd) params.set('endDate', customEnd);
+    }
+    return params;
+  }, [preset, customStart, customEnd, reportBranchId]);
+
+  const loadDashboard = useCallback(async () => {
+    setError(null);
+    const params = new URLSearchParams();
+    if (reportBranchId) params.set('branchId', reportBranchId);
+    const res = await fetch(`/api/finance/reports/dashboard?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok) { setError(data.error ?? 'Failed to load the financial dashboard.'); return; }
+    setDashboard(data.dashboard);
+  }, [reportBranchId]);
+
+  const loadIncomeStatement = useCallback(async () => {
+    if (preset === 'custom' && (!customStart || !customEnd)) return;
+    setError(null);
+    const res = await fetch(`/api/finance/reports/income-statement?${rangeParams().toString()}`);
+    const data = await res.json();
+    if (!res.ok) { setError(data.error ?? 'Failed to generate the income statement.'); return; }
+    setIncomeStatement(data.incomeStatement);
+  }, [rangeParams, preset, customStart, customEnd]);
+
+  const loadBalanceSheet = useCallback(async () => {
+    setError(null);
+    const params = new URLSearchParams();
+    if (reportBranchId) params.set('branchId', reportBranchId);
+    if (asOfDate) params.set('asOfDate', asOfDate);
+    const res = await fetch(`/api/finance/reports/balance-sheet?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok) { setError(data.error ?? 'Failed to generate the balance sheet.'); return; }
+    setBalanceSheet(data.balanceSheet);
+  }, [reportBranchId, asOfDate]);
+
+  const loadCashFlow = useCallback(async () => {
+    if (preset === 'custom' && (!customStart || !customEnd)) return;
+    setError(null);
+    const res = await fetch(`/api/finance/reports/cash-flow?${rangeParams().toString()}`);
+    const data = await res.json();
+    if (!res.ok) { setError(data.error ?? 'Failed to generate the cash flow statement.'); return; }
+    setCashFlow(data.cashFlow);
+  }, [rangeParams, preset, customStart, customEnd]);
+
+  useEffect(() => {
+    if (tab === 'dashboard') loadDashboard();
+    if (tab === 'income-statement') loadIncomeStatement();
+    if (tab === 'balance-sheet') loadBalanceSheet();
+    if (tab === 'cash-flow') loadCashFlow();
+  }, [tab, loadDashboard, loadIncomeStatement, loadBalanceSheet, loadCashFlow]);
+
+  const showRangeFilter = tab === 'income-statement' || tab === 'cash-flow';
+  const showAsOfFilter = tab === 'balance-sheet';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {REPORT_TABS.map((t) => (
+          <Button key={t.key} type="button" size="sm" variant={tab === t.key ? 'default' : 'outline'} onClick={() => setTab(t.key)}>
+            {t.label}
+          </Button>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <Label className="text-xs">Branch</Label>
+          <select
+            className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+            value={reportBranchId}
+            onChange={(e) => setReportBranchId(e.target.value)}
+          >
+            <option value="">All branches</option>
+            {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        </div>
+        {showRangeFilter && (
+          <>
+            <div>
+              <Label className="text-xs">Date range</Label>
+              <select
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                value={preset}
+                onChange={(e) => setPreset(e.target.value as (typeof DATE_RANGE_PRESETS)[number]['key'])}
+              >
+                {DATE_RANGE_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+              </select>
+            </div>
+            {preset === 'custom' && (
+              <>
+                <div>
+                  <Label className="text-xs">From</Label>
+                  <Input type="date" className="h-9" value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
+                </div>
+                <div>
+                  <Label className="text-xs">To</Label>
+                  <Input type="date" className="h-9" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
+                </div>
+              </>
+            )}
+          </>
+        )}
+        {showAsOfFilter && (
+          <div>
+            <Label className="text-xs">As of date (optional — defaults to now)</Label>
+            <Input type="date" className="h-9" value={asOfDate} onChange={(e) => setAsOfDate(e.target.value)} />
+          </div>
+        )}
+      </div>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {tab === 'dashboard' && <DashboardTab dashboard={dashboard} />}
+      {tab === 'income-statement' && <IncomeStatementTab incomeStatement={incomeStatement} />}
+      {tab === 'balance-sheet' && <BalanceSheetTab balanceSheet={balanceSheet} />}
+      {tab === 'cash-flow' && <CashFlowTab cashFlow={cashFlow} />}
+    </div>
+  );
+}
+
+function DashboardTab({ dashboard }: { dashboard: FinancialDashboard | null }) {
+  if (!dashboard) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  const cards: { label: string; value: string }[] = [
+    { label: "Today's Revenue", value: formatMoney(dashboard.todayRevenue) },
+    { label: "Today's Expenses", value: formatMoney(dashboard.todayExpenses) },
+    { label: 'Gross Profit', value: formatMoney(dashboard.grossProfit) },
+    { label: 'Net Profit', value: formatMoney(dashboard.netProfit) },
+    { label: 'Cash Position', value: formatMoney(dashboard.cashPosition) },
+    { label: 'Outstanding Receivables', value: formatMoney(dashboard.outstandingReceivables) },
+    { label: 'Outstanding Payables', value: formatMoney(dashboard.outstandingPayables) },
+    { label: 'Inventory Value', value: formatMoney(dashboard.inventoryValue) },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {cards.map((c) => (
+        <Card key={c.label}>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">{c.label}</p>
+            <p className="text-lg font-semibold">{c.value}</p>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function AccountLineTable({ rows }: { rows: AccountLineTotal[] }) {
+  if (rows.length === 0) return <p className="text-xs text-muted-foreground">None.</p>;
+  return (
+    <table className="w-full text-sm">
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.accountId} className="border-b last:border-0">
+            <td className="py-1 pr-3 font-mono text-xs text-muted-foreground">{r.code}</td>
+            <td className="py-1 pr-3">{r.name}</td>
+            <td className="py-1 text-right">{formatMoney(r.amount)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function IncomeStatementTab({ incomeStatement: s }: { incomeStatement: IncomeStatement | null }) {
+  if (!s) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Income statement</CardTitle>
+        <p className="text-xs text-muted-foreground">{new Date(s.startDate).toLocaleDateString()} – {new Date(s.endDate).toLocaleDateString()}</p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Revenue</p>
+          <AccountLineTable rows={s.revenue.accounts} />
+          <div className="flex justify-between border-t pt-1 text-sm font-medium"><span>Total revenue</span><span>{formatMoney(s.revenue.total)}</span></div>
+        </div>
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Cost of goods sold</p>
+          <AccountLineTable rows={s.cogs.accounts} />
+          <div className="flex justify-between border-t pt-1 text-sm font-medium"><span>Total COGS</span><span>{formatMoney(s.cogs.total)}</span></div>
+        </div>
+        <div className="flex justify-between border-t pt-2 text-sm font-semibold"><span>Gross profit</span><span>{formatMoney(s.grossProfit)}</span></div>
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Operating expenses</p>
+          <AccountLineTable rows={s.operatingExpenses.accounts} />
+          <div className="flex justify-between border-t pt-1 text-sm font-medium"><span>Total operating expenses</span><span>{formatMoney(s.operatingExpenses.total)}</span></div>
+        </div>
+        <div className="flex justify-between border-t-2 pt-2 text-base font-bold"><span>Net profit</span><span>{formatMoney(s.netProfit)}</span></div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function BalanceSheetTab({ balanceSheet: s }: { balanceSheet: BalanceSheet | null }) {
+  if (!s) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Balance sheet</CardTitle>
+        <p className="text-xs text-muted-foreground">As of {new Date(s.asOfDate).toLocaleDateString()}</p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Assets</p>
+          <AccountLineTable rows={s.assets.accounts} />
+          <div className="flex justify-between border-t pt-1 text-sm font-semibold"><span>Total assets</span><span>{formatMoney(s.assets.total)}</span></div>
+        </div>
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Liabilities</p>
+          <AccountLineTable rows={s.liabilities.accounts} />
+          <div className="flex justify-between border-t pt-1 text-sm font-medium"><span>Total liabilities</span><span>{formatMoney(s.liabilities.total)}</span></div>
+        </div>
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Equity</p>
+          <AccountLineTable rows={s.equity.accounts} />
+          <div className="flex justify-between text-sm"><span>Net income (unclosed, to date)</span><span>{formatMoney(s.equity.netIncomeToDate)}</span></div>
+          <div className="flex justify-between border-t pt-1 text-sm font-medium"><span>Total equity</span><span>{formatMoney(s.equity.total)}</span></div>
+        </div>
+        <div className="flex items-center justify-between border-t-2 pt-2 text-base font-bold">
+          <span>Liabilities + equity</span>
+          <span>{formatMoney(s.totalLiabilitiesAndEquity)}</span>
+        </div>
+        <span className={`inline-block rounded px-2 py-1 text-xs ${s.isBalanced ? 'bg-secondary text-secondary-foreground' : 'bg-destructive/15 text-destructive'}`}>
+          {s.isBalanced ? 'Balanced' : 'Out of balance'}
+        </span>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CashFlowTab({ cashFlow: s }: { cashFlow: CashFlow | null }) {
+  if (!s) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  const rows: { label: string; value: string }[] = [
+    { label: 'Operating activities', value: formatMoney(s.operatingActivities) },
+    { label: 'Investing activities', value: formatMoney(s.investingActivities) },
+    { label: 'Financing activities', value: formatMoney(s.financingActivities) },
+  ];
+  if (Number(s.unclassifiedActivities) !== 0) rows.push({ label: 'Unclassified', value: formatMoney(s.unclassifiedActivities) });
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Cash flow statement</CardTitle>
+        <p className="text-xs text-muted-foreground">{new Date(s.startDate).toLocaleDateString()} – {new Date(s.endDate).toLocaleDateString()}</p>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {rows.map((r) => (
+          <div key={r.label} className="flex justify-between text-sm"><span>{r.label}</span><span>{r.value}</span></div>
+        ))}
+        <div className="flex justify-between border-t pt-2 text-sm font-semibold"><span>Net cash flow</span><span>{formatMoney(s.netCashFlow)}</span></div>
+        <div className="flex justify-between text-xs text-muted-foreground"><span>Beginning cash</span><span>{formatMoney(s.beginningCash)}</span></div>
+        <div className="flex justify-between text-xs text-muted-foreground"><span>Ending cash</span><span>{formatMoney(s.endingCash)}</span></div>
+        <span className={`inline-block rounded px-2 py-1 text-xs ${s.isReconciled ? 'bg-secondary text-secondary-foreground' : 'bg-destructive/15 text-destructive'}`}>
+          {s.isReconciled ? 'Reconciled' : 'Not reconciled'}
+        </span>
+      </CardContent>
+    </Card>
   );
 }
 
