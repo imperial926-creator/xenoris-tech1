@@ -38,11 +38,7 @@ const NAV_ITEMS: NavItem[] = [
   // "unscheduled" rather than a phase number so this doesn't misleadingly
   // read as "coming soon in a phase already marked done."
   { href: '/dashboard/reports', label: 'Exports', phase: 'unscheduled' },
-  // Still a placeholder as of this point in Phase 12 (AnalyticsService/API/UI
-  // not built yet) — kept in sync with app/dashboard/analytics/page.tsx's
-  // PhasePlaceholder phase prop; both flip to `null`/real content together
-  // once the analytics dashboard ships later in this same phase.
-  { href: '/dashboard/analytics', label: 'Analytics', phase: 12 },
+  { href: '/dashboard/analytics', label: 'Analytics', phase: null },
   { href: '/dashboard/settings', label: 'Settings', phase: null },
 ];
 
