@@ -24,9 +24,12 @@ revenue/COGS, reservation and catering deposits, inventory purchases and waste, 
 expense-approval flow, and a trial balance proving debits always equal credits), and Phase 11
 (financial reporting: an income statement, a balance sheet that folds unclosed net income into
 equity so it always balances, a direct-method cash flow statement, and an owner-facing financial
-dashboard — every figure computed live from the posted ledger, never from UI aggregates) are
-implemented. Everything else (owner analytics, AI, notifications) is not built yet — see
-`docs/architecture.md` for the phase order.
+dashboard — every figure computed live from the posted ledger, never from UI aggregates), and
+Phase 12 (owner analytics: revenue, profit, customer, product, channel, inventory, and
+operational dashboards — six live-computed from Orders/Reservations/Catering/Inventory directly,
+and Profit reusing Phase 11's income statement so it never disagrees with the ledger) are
+implemented. Everything else (AI, notifications) is not built yet — see `docs/architecture.md`
+for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or

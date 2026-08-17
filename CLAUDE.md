@@ -848,8 +848,93 @@ response. Financial and inventory calculations are never trusted from the client
   unclassified bucket and the cash-to-cash-transfer-nets-to-zero case), and the dashboard's
   today-figures and branch scoping.
 
-**Not yet built** (Phases 12–16 per `docs/architecture.md`): owner analytics, AI insights,
-notifications, hardening, deployment.
+**Phase 12 — Owner Analytics: done.**
+
+- Master spec's "PHASE 12 — OWNER ANALYTICS" build list: Revenue dashboard, Profit dashboard,
+  Customer analytics, Product analytics, Channel analytics, Inventory analytics, Operational
+  analytics — plus the concrete metrics under §76's "Final Owner Experience" mock's SALES/
+  CUSTOMERS/OPERATIONS/INVENTORY headings (FINANCE was already covered by Phase 11).
+  `services/analytics/AnalyticsService.ts`.
+- **Data-sourcing split, deliberate and documented**: six of the seven methods read directly from
+  the operational tables (`Order`, `Reservation`, `CateringEvent`/`CateringPayment`, `Customer`,
+  `WasteRecord`, ...) — the same live-computed-never-a-stale-aggregate convention
+  `CustomerService`/`InventoryService` already use. `getProfitDashboard` is the sole exception: it
+  calls `ReportingService.generateIncomeStatement` once per trend bucket plus once for the
+  whole-range total, so "profit" here can never drift from Finance's own numbers — a second,
+  independent profit calculation was explicitly rejected as a design option.
+- Catering revenue is attributed to its BALANCE `CateringPayment`'s completion date everywhere in
+  this file, matching exactly when `AccountingService.recordCateringBalanceSettled` posts it to
+  the ledger's Catering Revenue account — keeping the operational-side "when did this happen"
+  answer consistent with the ledger's own, even though this file otherwise never reads the ledger.
+- Trend bucketing (`getRevenueDashboard`, `getProfitDashboard`): day/week/month granularity,
+  auto-chosen from the query range's length (≤31 days → day, ≤120 → week, else month — a
+  documented default, not a spec'd figure). Built on five new exported `lib/utils/timezone.ts`
+  helpers (`startOfWeekInTimezone`/`endOfWeekInTimezone`,
+  `startOfMonthInTimezone`/`endOfMonthInTimezone`,
+  `startOfQuarterInTimezone`/`endOfQuarterInTimezone`, `startOfYearInTimezone`/`endOfYearInTimezone`,
+  `dateKeyInTimezone`) added this phase, all built on a new `startOfLocalDateInTimezone` primitive
+  — see the Known Issues entry below for the real timezone bug this rewrite fixed along the way.
+  `getProfitDashboard`'s bucket partition is proven gapless/non-overlapping and reconciling: its
+  trend buckets' `netProfit` values are asserted, in the integration suite, to sum exactly to a
+  single whole-range `generateIncomeStatement` call's own `netProfit` — the master spec Phase 11
+  "verify reconciliation" instruction, extended to bucketing.
+- `getCustomerAnalytics`: new customers (necessarily org-wide — `Customer` carries no `branchId`,
+  see schema.prisma's Phase 8 comment #1), repeat-customer rate (repeat = had a non-cancelled order
+  before this period started), top spenders in range, plus lifetime RFM segment mix reused from
+  `CustomerService.segmentBreakdown` (all-time by construction, same N+1-at-scale caveat that
+  method's own doc comment already flags).
+- `getProductAnalytics`: top items by revenue/quantity and revenue-by-category, derived from one
+  `OrderItem.groupBy` plus a single batched `MenuItem` lookup — no second full table scan. Hit and
+  fixed the same `new Map(x.map(...))` TS-inference gap `ReportingService.
+  aggregateLinesByAccountType`'s own comment documents; switched to the same explicit-generic
+  populate-by-loop idiom.
+- `getChannelAnalytics`: revenue/count by `Order.type` plus catering, and sales bucketed by
+  hour-of-day (0-23) and Monday-first day-of-week, timezone-aware via local `Intl.DateTimeFormat`
+  helpers (same "no date-fns-tz" approach as `lib/utils/timezone.ts` itself, per that file's header
+  — `ReservationService`'s `dayKeyInTimezone`/`minutesSinceMidnightInTimezone` established the
+  precedent of each service owning its own small helpers rather than sharing one).
+- `getInventoryAnalytics`: waste cost (`WasteRecord.quantity × Ingredient.costPerUnit`, mirroring
+  `InventoryService.getCogsForOrder`'s formula generalized across a date range instead of one
+  order), purchase spend (`PurchaseOrder.total` where `receivedAt` falls in range), "food cost" as
+  actually-recognized COGS from recipe-based consumption (`InventoryTransaction` type
+  `SALE_CONSUMPTION`, `quantityDelta × unitCostAtTime`), and low/critical stock items via
+  `InventoryService.getLowStockItems` (looped per-branch when no `branchId` filter is given, since
+  that method is branch-required by design).
+- `getOperationalAnalytics`: reservations/catering-events/deliveries by status, table utilization
+  (distinct dine-in tables used ÷ active tables), and a "Kitchen" prep-to-ready average built from
+  pairing `OrderStatusHistory` `PREPARING`→`READY` transitions per order — the same timing data
+  Phase 5's kitchen board itself is built on, not a new measurement.
+- Permissions: no new grants needed — `analytics:view` already existed in Phase 1's forward-looking
+  catalog, already granted to `MANAGER`/`OWNER`/`ADMINISTRATOR` (not `ACCOUNTANT`/`STAFF`/`DRIVER`/
+  `CUSTOMER`). `getProfitDashboard`'s route additionally requires `finance:view` — a deliberate
+  departure from every other analytics route, since Phase 10 already withholds COGS/margin data
+  from `MANAGER` (who has `analytics:view` but not `finance:view`), and Profit surfaces exactly
+  that COGS/expense-derived figure; reopening it through a new URL would have quietly undone that
+  Phase 10 boundary.
+- API routes (all GET, gated on `PERMISSIONS.ANALYTICS_VIEW`; `/profit` additionally on
+  `PERMISSIONS.FINANCE_VIEW` via two sequential `requirePermission` calls):
+  `/api/analytics/{revenue,profit,customers,products,channels,inventory,operations}`.
+  `lib/validation/analytics.ts` re-exports Phase 11's `reportDateRangeQuerySchema` rather than
+  redefining it.
+- Dashboard UI: `components/analytics/analytics-board.tsx` replaces the `/dashboard/analytics`
+  placeholder — one tab per dashboard, a shared branch + §54 date-range-preset filter bar,
+  following `components/finance/finance-board.tsx`'s established pattern exactly (including its
+  Prisma-`Decimal`-serializes-to-a-string-over-JSON typing convention).
+- Master spec §55 (CSV/PDF/XLSX export of every major report) confirmed via grep to still not be
+  assigned to any build phase's own list (checked Phases 10–16 explicitly, both this phase and
+  last) — remains deliberately unscheduled, documented via `/dashboard/reports`'s "Exports"
+  placeholder (relabeled and reframed this phase — see the Known Issues entry below) rather than
+  silently dropped.
+- Tests: a standalone `tsx` sanity script (not committed — same throwaway-verification-script
+  convention used throughout every phase for sandbox-executable pure logic) confirmed the new
+  timezone bucket helpers and `AnalyticsService`'s pure bucketing math (granularity thresholds,
+  bucket enumeration, previous-period arithmetic, hour/weekday bucketing) against concrete
+  Asia/Manila inputs; `tests/integration/analytics/analytics-service.test.ts` covers all seven
+  dashboards against real fixtures built through the existing service layer (see that file for the
+  full list, including the profit-bucket-reconciliation proof above).
+
+**Not yet built** (Phases 13–16 per `docs/architecture.md`): AI insights, notifications, hardening,
+deployment.
 
 ## Known Issues / Environment Constraints
 
@@ -1179,6 +1264,60 @@ notifications, hardening, deployment.
   spot-checked by running it directly with `tsx` against concrete Asia/Manila timestamps (not just
   type-checked), confirming every preset's boundary (week starts Monday, month/quarter/year
   boundaries) matches hand computation exactly before it was relied on by any report.
+
+- **A real, self-discovered timezone bug was found and fixed while building Phase 12's bucket
+  helpers, not user-reported.** `lib/utils/timezone.ts`'s original `resolveDateRangePreset`
+  month/quarter/year branches built a `new Date(Date.UTC(year, month - 1, 1))` proxy for "the 1st
+  of the month" using components already known correct for the *current* zone-derived date, then
+  passed that proxy through `startOfDayInTimezone`, which internally re-derives Y/M/D by
+  reformatting the proxy in the target timezone. For any timezone **west** of UTC, midnight-UTC on
+  day 1 can format to the *last day of the previous month* once reinterpreted in that zone, quietly
+  corrupting the month/quarter/year start-of-period calculation. This never affected Asia/Manila
+  (UTC+8, this build's only real timezone) and so never surfaced as a test failure, but was judged
+  worth fixing given the "do not fake features"/production-grade rigor this build follows
+  throughout, especially since Phase 12 needed the same class of boundary computed correctly for
+  every new bucket helper anyway. Fixed by introducing `startOfLocalDateInTimezone(year, month,
+  day, timezone)` — builds the UTC instant directly from explicit calendar components, no
+  reformat-a-proxy round trip — and rebuilding every start/end-of-period helper on top of it.
+  Verified via a `tsx` sanity script (mirroring Phase 11's own methodology) covering all 9 presets
+  plus every new export, Dec→Jan and Q4→Q1 rollovers, and — specifically to prove the fix —
+  `America/Los_Angeles` (UTC-7/-8) month/quarter/year boundaries landing exactly on local midnight
+  with no drift: 39/39 checks passed. `tests/unit/reporting/timezone.test.ts`'s pre-existing
+  Asia/Manila assertions were confirmed unchanged (same values, same public function signatures).
+
+- **A genuine new `tsc` diagnostic, caught by the git-stash diff before it was committed**:
+  `components/layout/dashboard-nav.tsx`'s `NAV_ITEMS` used to be typed via `as const`, inferring a
+  15-way union of per-item object literal types. Once every item's `phase` field happened to
+  collapse to just `null | 'unscheduled'` (every numbered-phase entry having been flipped to `null`
+  as its feature shipped, phase by phase, across this whole build), TypeScript's control-flow
+  narrowing on the nav badge's `item.phase === 'unscheduled' ? 'Not scheduled' : \`Phase
+  ${item.phase}\`` ternary narrowed the fallback branch's `item` to `never` and failed to compile
+  (`TS2339` on `item.phase`) — a real diagnostic, not a sandbox artifact, confirmed via the same
+  clean-baseline `git stash -u` diff methodology every phase uses. Fixed by giving `NAV_ITEMS` an
+  explicit, deliberately-widened `NavItem[]` type instead of relying on `as const` inference — keeps
+  the narrowing correct regardless of which literal `phase` values happen to be present at any
+  point in the build (e.g. once Phase 13/14 add their own numbered nav entries back).
+
+- **Phase 12 could not execute `AnalyticsService.ts` itself in this sandbox**, same `node_modules`
+  constraint as every phase. Its pure bucketing logic (day/week/month granularity thresholds,
+  bucket-key enumeration and boundary math, previous-period arithmetic, hour/weekday bucketing) was
+  copied into a standalone script and run for real with `tsx` against concrete Asia/Manila inputs —
+  17/17 checks passed, including that a 31-day `this_month` produces exactly 31 day buckets, a
+  full year produces exactly 12 month buckets with `endOfMonthInTimezone`-based (not flat
+  30/31-day) stepping, and week buckets stay exactly 7 days apart across a 10-week span. The
+  `git stash -u` before/after `tsc` diff (checked out to the pre-Phase-12 commit `d6db857`, re-ran
+  `tsc --noEmit`, popped the stash back), run cumulatively across all four of this phase's commits,
+  confirmed the same result as every prior phase: baseline was 2,806 diagnostics (this session's own
+  recount of the Phase 11 baseline — see the note on measurement below), after Phase 12 was 3,127 —
+  321 more, entirely inside already-established categories (`TS7026` +282, dominated by
+  `analytics-board.tsx`'s many table-row JSX elements; `TS7006` +27; `TS2307` +10; `TS2882` +1 for
+  `AnalyticsService.ts`'s `server-only` import; `TS7053` +1). Zero new diagnostic categories
+  anywhere, and the two pre-existing non-artifact diagnostics (`TS2345` in
+  `app/dashboard/layout.tsx`, `TS18046` in `lib/utils/api-error.ts`) are unchanged. (This session's
+  own `wc -l`-based recount of the Phase 11 baseline read 2,806, one more than the 2,805 this file
+  recorded when Phase 11 was built — a trailing-newline/counting-method artifact between sessions,
+  not a real drift; every phase's own diff was still run against its own freshly-measured baseline,
+  which is what actually matters.)
 
 ## Required Environment Variables
 

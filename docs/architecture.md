@@ -881,3 +881,90 @@ Phase 10 built — nothing here writes a journal entry, and nothing here reads a
 table directly. Owner analytics (revenue/profit/customer/product/channel/inventory/operational
 dashboards, all driven by business-event tables rather than the ledger) are Phase 12's job per its
 own separate build list.
+
+## 20. Phase 12 — Owner Analytics
+
+`services/analytics/AnalyticsService.ts` fills exactly the scope boundary the previous section
+draws: the operational-count and charting half of §33's dashboard mockup and §34's Sales Analytics,
+plus the master spec's own "PHASE 12 — OWNER ANALYTICS" build list (Revenue dashboard, Profit
+dashboard, Customer analytics, Product analytics, Channel analytics, Inventory analytics,
+Operational analytics).
+
+**Data-sourcing split.** Six of the seven methods (`getRevenueDashboard`, `getCustomerAnalytics`,
+`getProductAnalytics`, `getChannelAnalytics`, `getInventoryAnalytics`, `getOperationalAnalytics`)
+read directly from `Order`/`OrderItem`/`Reservation`/`CateringEvent`/`CateringPayment`/`Customer`/
+`WasteRecord`/`PurchaseOrder`/`InventoryTransaction` — genuinely operational metrics, computed live,
+never from the ledger. `getProfitDashboard` is the deliberate exception: profit needs real COGS and
+expense figures, which only exist on the posted ledger, so it calls
+`ReportingService.generateIncomeStatement` once per trend bucket (plus once more for the whole-range
+total) rather than re-deriving profit from business-event tables a second time — the two numbers
+can never drift apart because there is only ever one calculation.
+
+**Trend bucketing.** `getRevenueDashboard` and `getProfitDashboard` both group their date range into
+day, week, or month buckets, auto-chosen from the range's length (≤31 days → day, ≤120 → week, else
+month). This required five new exported helpers in `lib/utils/timezone.ts` —
+`startOfWeekInTimezone`/`endOfWeekInTimezone`, `startOfMonthInTimezone`/`endOfMonthInTimezone`,
+`startOfQuarterInTimezone`/`endOfQuarterInTimezone`, `startOfYearInTimezone`/`endOfYearInTimezone`,
+and `dateKeyInTimezone` — all built on a new private `startOfLocalDateInTimezone(year, month, day,
+timezone)` primitive that constructs a UTC instant directly from explicit calendar components. That
+primitive replaced a subtly-buggy pattern the original `resolveDateRangePreset` used (building a
+same-day-of-month UTC proxy and reformatting it through the target zone to "discover" its calendar
+date) — see `CLAUDE.md`'s Known Issues for the full west-of-UTC failure mode this fixed. Every
+bucket enumeration is proven gapless and non-overlapping: `getProfitDashboard` clips only its first
+bucket's start and last bucket's end to the overall query range, leaving every interior boundary as
+`bucket[i].endDate + 1ms === bucket[i+1].startDate` exactly, which is what lets the trend buckets'
+`netProfit` values sum to precisely the same figure a single whole-range income statement call
+reports — proven in `tests/integration/analytics/analytics-service.test.ts`, the master spec Phase
+11 "verify reconciliation" instruction extended to bucketing.
+
+**Catering revenue timing.** Every method that touches catering revenue (`getRevenueDashboard`,
+`getChannelAnalytics`) attributes it to the date its `CateringPayment` (type `BALANCE`, status
+`COMPLETED`) posts — the exact instant `AccountingService.recordCateringBalanceSettled` recognizes
+it on the ledger — rather than the (usually earlier) inquiry/quote/deposit dates or
+`CateringEvent.eventDate`. This keeps the operational-side "when did this happen" answer consistent
+with the ledger's own, even though these methods never read the ledger directly.
+
+**Method-by-method notes:**
+
+- `getCustomerAnalytics`: "new customers" is necessarily org-wide (`Customer` carries no
+  `branchId` — see `schema.prisma`'s Phase 8 comment #1), even when a `branchId` filter narrows
+  every other figure. "Repeat" means the customer had a non-cancelled order before the queried
+  period started. Lifetime RFM segment mix is reused from `CustomerService.segmentBreakdown`
+  as-is (necessarily all-time — RFM has no date-range concept in this build).
+- `getProductAnalytics`: top products and revenue-by-category are both derived from one
+  `OrderItem.groupBy` plus a single batched `MenuItem` lookup, not a second full scan.
+- `getChannelAnalytics`: hour-of-day and day-of-week buckets are computed with small local
+  `Intl.DateTimeFormat`-based helpers inside `AnalyticsService.ts` itself, not shared from
+  `lib/utils/timezone.ts` — the same "each service owns its own small timezone helpers" precedent
+  `ReservationService`'s `dayKeyInTimezone`/`minutesSinceMidnightInTimezone` already established.
+- `getInventoryAnalytics`: waste cost is `WasteRecord.quantity × Ingredient.costPerUnit`; "food
+  cost" is COGS as actually recognized via recipe-based consumption
+  (`InventoryTransaction` type `SALE_CONSUMPTION`, mirroring `InventoryService.getCogsForOrder`'s
+  formula generalized across a range); low/critical stock items reuse
+  `InventoryService.getLowStockItems` per-branch (that method is branch-required by design, so an
+  org-wide query loops over every branch).
+- `getOperationalAnalytics`: table utilization is distinct dine-in tables used ÷ active tables;
+  the "Kitchen" figure pairs `OrderStatusHistory`'s `PREPARING`→`READY` transitions per order into
+  an average prep-to-ready duration — reusing Phase 5's own kitchen-timing data, not a new
+  measurement.
+
+Permissions: no new grants needed — `analytics:view` already existed in Phase 1's forward-looking
+catalog, granted to `MANAGER`/`OWNER`/`ADMINISTRATOR`. `getProfitDashboard`'s route additionally
+requires `finance:view`, gated via two sequential `requirePermission` calls rather than a new
+combined-permission helper — a deliberate departure from every other analytics route, preserving
+Phase 10's existing boundary that withholds COGS/margin data from `MANAGER`.
+
+API routes: `/api/analytics/{revenue,profit,customers,products,channels,inventory,operations}` —
+all `GET`, org-scoped via the session, with the same `preset`/`startDate`/`endDate`/`branchId` query
+shape Phase 11's report routes already validate (`lib/validation/analytics.ts` re-exports
+`reportDateRangeQuerySchema` rather than redefining it).
+
+Dashboard UI: `components/analytics/analytics-board.tsx`, one tab per dashboard, following
+`components/finance/finance-board.tsx`'s established pattern (branch + date-range-preset filter
+bar, `Prisma.Decimal`-serializes-to-a-plain-string-over-JSON typing convention).
+
+Scope boundary, stated plainly: this phase adds no new tables or columns at all — every method is
+pure read/aggregation over tables Phases 1–11 already built. Master spec §55 (CSV/PDF/XLSX export
+of every major report) remains deliberately unscheduled — confirmed via grep, again, to not be
+assigned to any phase's own build list — documented via the `/dashboard/reports` "Exports"
+placeholder rather than silently dropped.

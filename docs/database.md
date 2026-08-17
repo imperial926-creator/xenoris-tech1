@@ -618,6 +618,21 @@ caller overrides it; `isCashEquivalent` is not settable at creation (an org enab
 existing account via `updateAccount` if it adds a second cash-equivalent account, e.g. a GCash
 wallet).
 
+## Phase 12 Schema
+
+No new tables or columns — Phase 12 (Owner Analytics) is pure read/aggregation over existing
+tables via `services/analytics/AnalyticsService.ts`, split by dashboard: `getRevenueDashboard`
+reads `Order`/`CateringPayment`; `getProfitDashboard` reuses Phase 11's `ReportingService`
+(`generateIncomeStatement`) against the existing ledger rather than reading any table directly;
+`getCustomerAnalytics` reads `Customer`/`Order` (reusing `CustomerService.segmentBreakdown`);
+`getProductAnalytics` reads `OrderItem`/`MenuItem`; `getChannelAnalytics` reads `Order`/
+`CateringEvent`; `getInventoryAnalytics` reads `WasteRecord`/`Ingredient`/`PurchaseOrder`/
+`InventoryTransaction` (and calls `InventoryService.getLowStockItems` per branch); and
+`getOperationalAnalytics` reads `Reservation`/`CateringEvent`/`Delivery`/`RestaurantTable`/
+`Order`/`OrderStatusHistory`. See `docs/architecture.md` § 20 for the full data-sourcing
+rationale, the trend-bucketing/reconciliation design, and the catering revenue-recognition
+timing convention this phase relies on.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
