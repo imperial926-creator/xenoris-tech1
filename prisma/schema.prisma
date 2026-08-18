@@ -94,6 +94,14 @@ enum BranchStatus {
   TEMPORARILY_CLOSED
 }
 
+// Phase 15 hardening (database review): the financial/historical child
+// models below (Invoice, InventoryTransaction, PurchaseOrder, WasteRecord,
+// CateringPayment, JournalEntry, FinancialTransaction, Expense) all use
+// onDelete: Restrict on their `branch` relation, not Cascade — deleting a
+// branch must never silently delete or orphan a ledger/audit trail record.
+// A branch with financial history has to be deactivated (BranchStatus),
+// not hard-deleted, which this now enforces at the DB level rather than
+// only by convention. See migration 20260818040000_phase15_db_financial_hardening.
 model Branch {
   id             String       @id @default(cuid())
   organizationId String
@@ -341,7 +349,13 @@ model TableSection {
   branch Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
   tables RestaurantTable[]
 
-  @@unique([branchId, name])
+  // Phase 15 hardening: was a plain @@unique([branchId, name]), which
+  // permanently blocks reusing a section name after deactivation (active =
+  // false) — the same "partial unique index, no representation in Prisma's
+  // schema DSL" gap documented in the Order model's header comment (§5) for
+  // invoices_one_active_per_order. Hand-written directly into the migration
+  // SQL instead: CREATE UNIQUE INDEX table_sections_branchId_name_active_key
+  // ON table_sections ("branchId", "name") WHERE (active);
   @@index([organizationId])
   @@index([branchId])
   @@map("table_sections")
@@ -414,7 +428,10 @@ model MenuCategory {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   items        MenuItem[]
 
-  @@unique([organizationId, name])
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment above for the full
+  // rationale. CREATE UNIQUE INDEX menu_categories_organizationId_name_active_key
+  // ON menu_categories ("organizationId", "name") WHERE (active);
   @@index([organizationId])
   @@map("menu_categories")
 }
@@ -972,7 +989,7 @@ model Invoice {
   notes      String?
 
   organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
   order        Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
   items        InvoiceItem[]
 
@@ -1099,7 +1116,10 @@ model DeliveryZone {
   branch         Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
   deliveryOrders DeliveryOrder[]
 
-  @@unique([branchId, name])
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX delivery_zones_branchId_name_active_key
+  // ON delivery_zones ("branchId", "name") WHERE (active);
   @@index([organizationId])
   @@map("delivery_zones")
 }
@@ -1309,7 +1329,10 @@ model CateringPackage {
   inquiries    CateringInquiry[]
   quotes       CateringQuote[]
 
-  @@unique([branchId, name])
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX catering_packages_branchId_name_active_key
+  // ON catering_packages ("branchId", "name") WHERE (active);
   @@index([organizationId])
   @@map("catering_packages")
 }
@@ -1499,7 +1522,7 @@ model CateringPayment {
   createdAt      DateTime            @default(now())
 
   organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
   event        CateringEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
@@ -1938,7 +1961,7 @@ model InventoryTransaction {
   createdAt       DateTime                 @default(now())
 
   organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
   inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
   recordedBy    User?         @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
 
@@ -1963,7 +1986,10 @@ model Supplier {
   organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   purchaseOrders PurchaseOrder[]
 
-  @@unique([organizationId, name])
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX suppliers_organizationId_name_active_key
+  // ON suppliers ("organizationId", "name") WHERE (active);
   @@index([organizationId])
   @@map("suppliers")
 }
@@ -1994,7 +2020,7 @@ model PurchaseOrder {
   updatedAt          DateTime            @updatedAt
 
   organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
   createdBy    User?               @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
   items        PurchaseOrderItem[]
@@ -2079,7 +2105,7 @@ model WasteRecord {
   createdAt        DateTime @default(now())
 
   organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
   inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
   recordedBy    User?         @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
 
@@ -2319,9 +2345,14 @@ model JournalEntry {
   updatedAt          DateTime       @updatedAt
 
   organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch?           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch       Branch?           @relation(fields: [branchId], references: [id], onDelete: Restrict)
   period       AccountingPeriod  @relation(fields: [periodId], references: [id], onDelete: Restrict)
-  reversalOf   JournalEntry?     @relation("JournalEntryReversal", fields: [reversalOfEntryId], references: [id], onDelete: SetNull)
+  // Phase 15 hardening: was SetNull — deleting the original entry would
+  // have silently detached its reversal, breaking the reversal audit
+  // trail without any error. Journal entries are never hard-deleted by
+  // any code path today, but the DB constraint should say so, not just
+  // application convention.
+  reversalOf   JournalEntry?     @relation("JournalEntryReversal", fields: [reversalOfEntryId], references: [id], onDelete: Restrict)
   reversedBy   JournalEntry?     @relation("JournalEntryReversal")
   postedBy     User?             @relation("JournalEntryPostedBy", fields: [postedByUserId], references: [id], onDelete: SetNull)
   createdBy    User?             @relation("JournalEntryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
@@ -2385,7 +2416,7 @@ model FinancialTransaction {
   createdAt      DateTime                 @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Restrict)
   journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
 
   // The idempotency guard — see file header decision #3.
@@ -2410,7 +2441,10 @@ model ExpenseCategory {
   defaultAccount ChartOfAccount? @relation(fields: [defaultAccountId], references: [id], onDelete: SetNull)
   expenses       Expense[]
 
-  @@unique([organizationId, name])
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX expense_categories_organizationId_name_active_key
+  // ON expense_categories ("organizationId", "name") WHERE (active);
   @@index([organizationId])
   @@map("expense_categories")
 }
@@ -2430,7 +2464,10 @@ model Vendor {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   expenses     Expense[]
 
-  @@unique([organizationId, name])
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX vendors_organizationId_name_active_key
+  // ON vendors ("organizationId", "name") WHERE (active);
   @@index([organizationId])
   @@map("vendors")
 }
@@ -2463,7 +2500,7 @@ model Expense {
   updatedAt        DateTime              @updatedAt
 
   organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   vendor       Vendor?             @relation(fields: [vendorId], references: [id], onDelete: SetNull)
   category     ExpenseCategory     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   recordedBy   User?               @relation("ExpenseRecordedBy", fields: [recordedByUserId], references: [id], onDelete: SetNull)
