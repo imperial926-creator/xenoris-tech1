@@ -7,6 +7,10 @@ import { prisma } from '@/lib/db/prisma';
  */
 export async function resetDatabase() {
   await prisma.auditLog.deleteMany();
+  // Phase 14 — notifications. Same cross-cutting-log shape as auditLog
+  // above (organizationId/branchId FKs, no other table references it) —
+  // deleted alongside it, before anything it could reference.
+  await prisma.notification.deleteMany();
   // Phase 10 — accounting. Deleted first (before menuItem/branch/
   // organization/user further down): expenseAttachment references expense;
   // expense references vendor/expenseCategory/journalEntry (all SET NULL or
