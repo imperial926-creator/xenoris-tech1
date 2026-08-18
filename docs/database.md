@@ -648,6 +648,50 @@ surfacing), merged over `DEFAULT_AI_INSIGHT_THRESHOLDS` via `resolveAiInsightThr
 master spec §37's "All rules must be configurable" applies to this phase's rules exactly as it did
 to RFM's. Migration `20260818010000_phase13_ai`.
 
+## Phase 14 Schema
+
+One new table and three new enums — Phase 14 (Notifications) records every attempted send as its
+own row; nothing about any existing table changes. Migration `20260818020000_phase14_notifications`.
+
+### Notification (new)
+
+`id, organizationId, branchId, type (NotificationType), channel (NotificationChannel), status
+(NotificationStatus), recipient (String?), subject (String?), body (String), relatedEntityType
+(String?), relatedEntityId (String?), providerReference (String?), errorMessage (String?),
+createdAt, sentAt (DateTime?)`.
+
+- **One row per channel per attempted send**, not one row per notification "event" with multiple
+  statuses — a notification that fans out to EMAIL and SMS produces two rows. This keeps each
+  channel's delivery outcome independently queryable (`WHERE channel = 'SMS' AND status = 'FAILED'`
+  needs no JSON/array unpacking) and means every attempt, including a skip, has a durable audit
+  trail — a missing row is never ambiguous with "the service was never called."
+- `relatedEntityType`/`relatedEntityId` (string type name + id) is the same polymorphic-reference
+  shape `AuditLog.entityType`/`entityId` already established in Phase 1, reused rather than adding a
+  set of nullable per-entity-type foreign keys (`reservationId?`, `orderId?`, ...) that would need a
+  new nullable column every time a new notification-triggering entity type is added.
+- `NotificationType` — the 11 master-spec §40 types: `RESERVATION_CONFIRMATION`,
+  `RESERVATION_REMINDER`, `DEPOSIT_REMINDER`, `ORDER_CONFIRMATION`, `ORDER_STATUS`,
+  `DELIVERY_UPDATE`, `CATERING_QUOTATION`, `CATERING_REMINDER`, `PAYMENT_REMINDER`, `INVOICE`,
+  `REVIEW_REQUEST`.
+- `NotificationChannel` — `EMAIL`, `SMS`, `PUSH`. `PUSH` is declared for interface completeness but
+  never actually produced by `NotificationService` in this build — no device-token/push-subscription
+  registration flow exists anywhere in this codebase yet, so there is no recipient to push to (see
+  `docs/architecture.md` § 22).
+- `NotificationStatus` — `SENT`, `FAILED`, `SKIPPED_NOT_CONFIGURED` (no provider is registered — see
+  `lib/notifications/{EmailProvider,SmsProvider,PushProvider}.ts`), `SKIPPED_NO_RECIPIENT` (the
+  triggering entity had no guestEmail/guestPhone on file for that channel). Decided independently
+  per channel per row — an entity with only an email on file gets `SKIPPED_NO_RECIPIENT` for its SMS
+  row and (today, since no provider exists) `SKIPPED_NOT_CONFIGURED` for its EMAIL row.
+- `recipient`/`subject`/`body` are the actual resolved values at send time (subject is null for SMS,
+  which has no subject line), not references back to the triggering entity — so notification history
+  remains readable even if the underlying reservation/order/etc. is later modified.
+
+### Organization / Branch (additions)
+
+`notifications (Notification[])` — the inverse relation, added to both for the same reason every
+other branch-scoped table carries both FKs: every notification is scoped to one branch (where the
+business event happened) within one organization (the tenant boundary).
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their

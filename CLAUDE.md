@@ -1031,7 +1031,74 @@ response. Financial and inventory calculations are never trusted from the client
   and an exact-value regression check against a hand-computed fixture: `[150, 0, 300, 0, 450]` ->
   projects to `360.00` then `420.00`).
 
-**Not yet built** (Phases 14–16 per `docs/architecture.md`): notifications, hardening, deployment.
+**Phase 14 — Notifications: done.**
+
+- Master spec's "PHASE 14 — NOTIFICATIONS" build list: "Implement: Email, Push, SMS abstraction,"
+  plus §40's fuller type list (Reservation confirmation, Reservation reminder, Deposit reminder,
+  Order confirmation, Order status, Delivery updates, Catering quotation, Catering reminder,
+  Payment reminder, Invoice, Review request) and §44's `NotificationService` naming.
+- Prisma schema additions: `Notification` (+ `NotificationType`, `NotificationChannel`,
+  `NotificationStatus` enums), migration `20260818020000_phase14_notifications`. One row per
+  channel per attempted send — a notification fanning out to EMAIL and SMS produces two
+  independent rows, not one row with two statuses, so each channel's delivery outcome is
+  independently queryable/auditable, and every attempt (including both `SKIPPED_*` cases) is
+  logged so a missing row is never ambiguous with "the service was never called."
+  `relatedEntityType`/`relatedEntityId` reuse `AuditLog`'s existing polymorphic-reference pattern
+  rather than a set of nullable per-entity FKs.
+- **Provider abstractions** (`lib/notifications/{EmailProvider,SmsProvider,PushProvider}.ts`) —
+  the same "unconfigured stub that fails loudly" pattern as `lib/payments/PaymentProvider.ts` and
+  `lib/ai/AIProvider.ts`: an interface, an `Unconfigured*Provider` that throws unconditionally as
+  a safety net, and a `get*Provider()` factory reading the exact env var `.env.example` already
+  reserved (`EMAIL_PROVIDER_KEY`/`SMS_PROVIDER_KEY`/`PUSH_NOTIFICATION_KEY`). No real provider is
+  implemented, so every factory always returns its unconfigured stub today. Push is a documented
+  special case: this build has no device-token/push-subscription registration flow anywhere, so
+  `NotificationService` never actually calls `getPushProvider()` at all — the interface exists for
+  a future phase that adds device registration, not because anything here dispatches through it.
+- **`NotificationService`** (`services/notifications/NotificationService.ts`) — 11 methods, one
+  per master-spec-§40 type. Never throws: every public method catches everything internally,
+  because notifications are best-effort side effects of a real business transaction and a flaky
+  provider must never fail, delay, or roll back a reservation/order/etc. Every call site in this
+  codebase calls these methods *after* its own `prisma.$transaction(...)` has already resolved,
+  specifically so a notification failure can never touch data that already durably committed.
+  Recipients are sourced from the guestName/guestEmail/guestPhone snapshot already present on the
+  triggering `Reservation`/`Order`/`CateringInquiry`/`CateringEvent` row — the same
+  "contact-at-time-of-booking, independent of any linked account" convention used throughout this
+  codebase — never a fresh join out to `Customer`/`User`. `RESERVATION_REMINDER`,
+  `DEPOSIT_REMINDER`, `CATERING_REMINDER`, and `PAYMENT_REMINDER` are fully implemented and
+  callable but not auto-wired to any trigger — this codebase has no cron/scheduler infrastructure
+  in any prior phase, so they're built ready for a future scheduled job, the same "correct
+  interface, flag what's not wired" discipline used for `PaymentProvider`/`AIProvider`.
+- **Wired into 7 existing call sites**: `ReservationService.updateStatus` (transition to
+  `CONFIRMED` -> confirmation; to `COMPLETED` -> review request — "confirmation" is read as the
+  internal `CONFIRMED` state-machine step, a real staff-driven transition, unlike an order's
+  creation-time "confirmation"), `OrderService.createOrder` (confirmation, fired at creation since
+  an order's "confirmation" reads as a receipt/acknowledgment of placement, not the internal
+  `CONFIRMED` kitchen-side status), `OrderService.updateStatus` (every transition -> order status;
+  `COMPLETED` -> review request), `DeliveryService.updateStatus` (every transition -> delivery
+  update; deliberately not `assignDriver`, which is its own entry point with its own audit trail),
+  `CateringService.updateQuoteStatus` (transition to `SENT` -> quotation), `CateringService
+  .updateEventStatus` (transition to `COMPLETED` -> review request), `InvoiceService.issueInvoice`
+  (invoice, on successful issuance). Each site was restructured to capture its transaction's
+  result into a local variable before returning, so the notification call runs after commit, not
+  inside the transaction.
+- Permissions: new `NOTIFICATION_VIEW` (`notification:view`), granted to `MANAGER` by default (and
+  to `OWNER`/`ADMINISTRATOR` via their existing "every catalog permission" grant) — narrower than
+  `AUDIT_VIEW` (owner/admin only), since this is an operational communications log a manager
+  routinely needs ("the guest says they never got a confirmation"), not a full change-history
+  audit trail.
+- API + dashboard UI: `GET /api/branches/[id]/notifications` (filterable by
+  type/channel/status/relatedEntity, bounded page size), `/dashboard/notifications` — a
+  branch/type/status-filterable delivery-history board following `invoice-board.tsx`'s established
+  branch-select pattern, added to the nav after AI Insights.
+- Tests: `tests/integration/notifications/notification-service.test.ts` covers direct-call content
+  and recipient-resolution correctness (money/date template formatting, `SKIPPED_NOT_CONFIGURED`
+  with a real recipient present, `SKIPPED_NO_RECIPIENT` decided independently per channel), wiring
+  assertions walking full reservation/order/delivery/catering/invoice lifecycles and counting the
+  exact notification rows each transition should (and should not) produce, and `list()`
+  (type/status filtering, branch scoping, cross-org rejection). `tests/helpers/db.ts`'s shared
+  `resetDatabase()` gained a `notification.deleteMany()`.
+
+**Not yet built** (Phases 15–16 per `docs/architecture.md`): hardening, deployment.
 
 ## Known Issues / Environment Constraints
 

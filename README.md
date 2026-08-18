@@ -31,9 +31,12 @@ and Profit reusing Phase 11's income statement so it never disagrees with the le
 Phase 13 (AI: a deterministic, template-based insight-generation engine — sales/margin/expense/
 customer/product/inventory/demand trend detection over configurable thresholds, plus a disclosed
 revenue forecast — reading only through read-only tools over Phase 12's own analytics, never given
-database write access, with every insight naming the real data it came from) are implemented.
-Everything else (notifications, hardening, deployment) is not built yet — see
-`docs/architecture.md` for the phase order.
+database write access, with every insight naming the real data it came from), and Phase 14
+(notifications: Email/SMS/Push provider abstractions — none configured yet — and a
+`NotificationService` covering every master-spec notification type, wired into reservation, order,
+delivery, catering, and invoice status changes as a best-effort side effect that never blocks the
+underlying transaction) are implemented. Everything else (hardening, deployment) is not built
+yet — see `docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or

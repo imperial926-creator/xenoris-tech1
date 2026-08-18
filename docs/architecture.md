@@ -1065,3 +1065,87 @@ grid plus a revenue-forecast card, following `analytics-board.tsx`'s filter-bar 
 
 Scope boundary, stated plainly: this phase adds exactly one nullable JSON column
 (`Organization.aiSettings`) and no new tables — see `docs/database.md`.
+
+## 22. Phase 14 — Notifications
+
+`services/notifications/NotificationService.ts` is the master spec's "PHASE 14 — NOTIFICATIONS"
+build ("Implement: Email, Push, SMS abstraction") plus §40's full type list. §44 names
+`NotificationService` (singular) directly in its example service list.
+
+**Design principle: best-effort side effect, never a blocking dependency.** A notification is a
+consequence of a real business transaction (a reservation confirmed, an order placed), not a
+precondition for it. Every `NotificationService` public method catches everything internally and
+never throws; every call site in this codebase calls it *after* its own `prisma.$transaction(...)`
+has already resolved — not inside it — both so slow provider I/O never holds a database transaction
+open, and so a notification failure can never roll back data that already durably committed.
+
+**One row per channel per attempt.** A notification fanning out to EMAIL and SMS produces two
+independent `Notification` rows, not one row with two statuses — each channel's delivery outcome is
+independently queryable/auditable, and every attempt (including `SKIPPED_NOT_CONFIGURED` and
+`SKIPPED_NO_RECIPIENT`) is logged, so a missing row is never ambiguous with "the service was never
+called." `relatedEntityType`/`relatedEntityId` reuse `AuditLog`'s existing polymorphic-reference
+shape (string type + id) rather than a set of nullable per-entity-type foreign keys.
+
+**Provider abstractions** (`lib/notifications/{EmailProvider,SmsProvider,PushProvider}.ts`) — the
+same "unconfigured stub that fails loudly" shape as `lib/payments/PaymentProvider.ts` and
+`lib/ai/AIProvider.ts`: an interface, an `Unconfigured*Provider` that throws unconditionally
+(`NotificationService` checks `provider.name === 'unconfigured'` before ever calling `send`, so the
+throw is a safety net, not the normal path), and a `get*Provider()` factory reading the exact env
+var `.env.example` already reserved since Phase 1 (`EMAIL_PROVIDER_KEY`, `SMS_PROVIDER_KEY`,
+`PUSH_NOTIFICATION_KEY`). No concrete provider is implemented, so every factory always returns its
+stub today — wiring a real one in later changes only that factory's body, not any call site.
+
+Push is a documented exception to "every channel gets tried": this codebase has no device-token or
+push-subscription registration flow anywhere (no mobile app, no service-worker subscription capture
+on the dashboard), so there is no recipient to push to even in principle. `NotificationService`
+therefore never calls `getPushProvider()` at all — only EMAIL and SMS are attempted. The interface
+exists so a future phase that adds device registration has the correct seam already shaped, per this
+codebase's established "build the correct interface, flag what's not wired" discipline.
+
+**Recipient resolution** reuses the guestName/guestEmail/guestPhone snapshot already present
+directly on `Reservation`, `Order`, `CateringInquiry`, and `CateringEvent` — the same
+"contact-at-time-of-booking, independent of any linked `User`/`Customer` account" convention already
+used throughout this codebase (see e.g. Phase 3/4's own schema comments) — rather than a fresh join
+out to `Customer`/`User`. Every triggering service method already has this data in hand from its own
+query, so no call site needs an extra round-trip.
+
+**Trigger-site mapping** — one master-spec §40 type per triggering condition, all 7 wired into
+existing services:
+
+| Type | Trigger | Site |
+| --- | --- | --- |
+| Reservation confirmation | status -> `CONFIRMED` | `ReservationService.updateStatus` |
+| Order confirmation | order created | `OrderService.createOrder` |
+| Order status | every status transition | `OrderService.updateStatus` |
+| Delivery updates | every status transition | `DeliveryService.updateStatus` |
+| Catering quotation | quote status -> `SENT` | `CateringService.updateQuoteStatus` |
+| Invoice | invoice issued | `InvoiceService.issueInvoice` |
+| Review request | order/reservation/event -> `COMPLETED` | all three of the above |
+
+`Reservation confirmation` is deliberately tied to the internal `CONFIRMED` state-machine
+transition, not reservation creation — `PENDING` -> `CONFIRMED` is a real, distinct, staff-driven
+step in this codebase's state machine. `Order confirmation` is deliberately tied to *creation*
+instead — an order's "confirmation" reads as a receipt/acknowledgment of placement, not the
+internal `CONFIRMED` kitchen-side status, so the two "confirmation" events land at different points
+in their respective lifecycles on purpose. `DeliveryService.assignDriver` is deliberately excluded —
+it is its own entry point with its own audit trail (`DriverAssignment`), not part of the generic
+status whitelist `updateStatus` validates against.
+
+`Reservation reminder`, `Deposit reminder`, `Catering reminder`, and `Payment reminder` are fully
+implemented as callable `NotificationService` methods but are not wired to any automatic trigger —
+this codebase has no cron/scheduler infrastructure in any prior phase (see § Risks), so these are
+built ready to be invoked from a future scheduled job, the same discipline already applied to
+`PaymentProvider`/`AIProvider`.
+
+Permissions: new `NOTIFICATION_VIEW`, granted to `MANAGER` by default (and to `OWNER`/
+`ADMINISTRATOR` via their existing "every catalog permission" grant) — narrower than `AUDIT_VIEW`
+(owner/admin only) since this is an operational communications log, not a full change-history audit
+trail.
+
+API + dashboard UI: `GET /api/branches/[id]/notifications` (filterable, bounded page size),
+`components/notifications/notifications-board.tsx` (`/dashboard/notifications`) — a branch/type/
+status-filterable delivery-history board following `invoice-board.tsx`'s established pattern.
+
+Scope boundary, stated plainly: this phase adds exactly one new table (`Notification`) and three
+new enums, and touches 7 existing service methods to call it — no changes to any existing table's
+schema. See `docs/database.md`.
