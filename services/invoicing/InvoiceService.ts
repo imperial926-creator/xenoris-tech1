@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { OrderService } from '@/services/orders/OrderService';
+import { NotificationService } from '@/services/notifications/NotificationService';
 import type { VoidInvoiceInput } from '@/lib/validation/order';
 
 const INVOICE_INCLUDE = { items: true } satisfies Prisma.InvoiceInclude;
@@ -61,8 +62,9 @@ export class InvoiceService {
       );
     }
 
+    let issuedInvoice;
     try {
-      return await prisma.$transaction(async (tx) => {
+      issuedInvoice = await prisma.$transaction(async (tx) => {
         // Atomic per-branch counter: upsert increments under the row lock
         // Postgres takes on the UPDATE path, so two concurrent issuances
         // for the same branch serialize here rather than racing to read
@@ -117,6 +119,20 @@ export class InvoiceService {
     } catch (error) {
       throw this.translateDbError(error);
     }
+
+    // Phase 14 — Notifications. Fired after the transaction above has
+    // already committed — see NotificationService's class header point 1.
+    // Recipient sourced from `order`, already fetched at the top of this
+    // method (Order has guestName/guestEmail/guestPhone as plain scalar
+    // columns regardless of include).
+    await NotificationService.sendInvoice(organizationId, branchId, {
+      invoiceId: issuedInvoice.id,
+      invoiceNumber: issuedInvoice.invoiceNumber,
+      total: issuedInvoice.total,
+      order,
+    });
+
+    return issuedInvoice;
   }
 
   static async voidInvoice(

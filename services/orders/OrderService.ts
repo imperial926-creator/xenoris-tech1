@@ -7,6 +7,7 @@ import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
 import { InventoryService } from '@/services/inventory/InventoryService';
 import { AccountingService } from '@/services/accounting/AccountingService';
+import { NotificationService } from '@/services/notifications/NotificationService';
 import type {
   CreateOrderInput,
   ListOrdersQueryInput,
@@ -162,8 +163,9 @@ export class OrderService {
     const resolvedItems = await this.resolveAndPriceItems(organizationId, input.items);
     const totals = this.computeOrderTotals(resolvedItems, input.discountAmount, deliveryFee);
 
+    let createdOrder;
     try {
-      return await prisma.$transaction(async (tx) => {
+      createdOrder = await prisma.$transaction(async (tx) => {
         if (input.type === 'DINE_IN' && input.tableId) {
           await this.seatTable(tx, input.tableId);
         }
@@ -256,6 +258,15 @@ export class OrderService {
     } catch (error) {
       throw this.translateDbError(error);
     }
+
+    // Phase 14 — Notifications. Fired after the transaction above has
+    // already committed — see NotificationService's class header point 1.
+    // "Order confirmation" fires at creation (unlike a reservation's
+    // CONFIRMED-transition trigger — see ReservationService.updateStatus —
+    // an order's "confirmation" is treated like a receipt/acknowledgment
+    // of placement, not the internal CONFIRMED kitchen-side status).
+    await NotificationService.sendOrderConfirmation(organizationId, branchId, createdOrder);
+    return createdOrder;
   }
 
   static async updateStatus(
@@ -278,7 +289,7 @@ export class OrderService {
       throw new ConflictError('cancellationReason is required when cancelling an order.');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.order.update({
         where: { id: orderId },
         data: {
@@ -357,6 +368,23 @@ export class OrderService {
 
       return tx.order.findUniqueOrThrow({ where: { id: updated.id }, include: ORDER_INCLUDE });
     });
+
+    // Phase 14 — Notifications. Fired after the transaction above has
+    // already committed — see NotificationService's class header point 1.
+    // "Order status" fires on every transition; COMPLETED additionally
+    // fires "Review request" per the master-spec §40 -> trigger-site
+    // mapping documented on NotificationService.
+    await NotificationService.sendOrderStatusUpdate(organizationId, branchId, result);
+    if (input.status === 'COMPLETED') {
+      await NotificationService.sendReviewRequest(organizationId, branchId, {
+        ...result,
+        relatedEntityType: 'Order',
+        relatedEntityId: result.id,
+        label: 'order',
+      });
+    }
+
+    return result;
   }
 
   /**

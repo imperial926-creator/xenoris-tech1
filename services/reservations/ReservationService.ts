@@ -6,6 +6,7 @@ import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
 import { AccountingService } from '@/services/accounting/AccountingService';
+import { NotificationService } from '@/services/notifications/NotificationService';
 import type {
   AvailabilityQueryInput,
   CreateReservationInput,
@@ -255,7 +256,7 @@ export class ReservationService {
       throw new ConflictError('cancellationReason is required when cancelling a reservation.');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.reservation.update({
         where: { id: reservationId },
         data: {
@@ -312,6 +313,24 @@ export class ReservationService {
         include: RESERVATION_INCLUDE,
       });
     });
+
+    // Phase 14 — Notifications. Fired *after* the transaction above has
+    // already committed — see NotificationService's class header point 1
+    // ("never throws", "best-effort side effect"). CONFIRMED and COMPLETED
+    // are the only two transitions with a notification per the master-spec
+    // §40 -> trigger-site mapping documented on NotificationService.
+    if (input.status === 'CONFIRMED') {
+      await NotificationService.sendReservationConfirmation(organizationId, branchId, result);
+    } else if (input.status === 'COMPLETED') {
+      await NotificationService.sendReviewRequest(organizationId, branchId, {
+        ...result,
+        relatedEntityType: 'Reservation',
+        relatedEntityId: result.id,
+        label: 'reservation',
+      });
+    }
+
+    return result;
   }
 
   /**

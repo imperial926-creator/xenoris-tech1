@@ -6,6 +6,7 @@ import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { CustomerService } from '@/services/crm/CustomerService';
 import { AccountingService } from '@/services/accounting/AccountingService';
+import { NotificationService } from '@/services/notifications/NotificationService';
 import type {
   CreateCateringPackageInput,
   UpdateCateringPackageInput,
@@ -422,7 +423,7 @@ export class CateringService {
       throw new ConflictError('cancellationReason is required when cancelling a quote.');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.cateringQuote.update({
         where: { id: quoteId },
         data: {
@@ -478,6 +479,17 @@ export class CateringService {
 
       return tx.cateringQuote.findUniqueOrThrow({ where: { id: updated.id }, include: QUOTE_INCLUDE });
     });
+
+    // Phase 14 — Notifications. Fired after the transaction above has
+    // already committed — see NotificationService's class header point 1.
+    // "Catering quotation" fires when a quote transitions to SENT;
+    // recipient sourced from result.inquiry, since QUOTE_INCLUDE already
+    // includes it.
+    if (input.status === 'SENT') {
+      await NotificationService.sendCateringQuotation(organizationId, branchId, result);
+    }
+
+    return result;
   }
 
   // --- events --------------------------------------------------------------------
@@ -533,7 +545,7 @@ export class CateringService {
       throw new ConflictError('cancellationReason is required when cancelling a catering event.');
     }
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.cateringEvent.update({
         where: { id: eventId },
         data: {
@@ -548,6 +560,22 @@ export class CateringService {
       });
       return tx.cateringEvent.findUniqueOrThrow({ where: { id: updated.id }, include: EVENT_INCLUDE });
     });
+
+    // Phase 14 — Notifications. Fired after the transaction above has
+    // already committed — see NotificationService's class header point 1.
+    // "Review request" fires when the event reaches COMPLETED, one of the
+    // three "service just finished" trigger sites (alongside
+    // OrderService.updateStatus and ReservationService.updateStatus).
+    if (input.status === 'COMPLETED') {
+      await NotificationService.sendReviewRequest(organizationId, branchId, {
+        ...result,
+        relatedEntityType: 'CateringEvent',
+        relatedEntityId: result.id,
+        label: 'catering event',
+      });
+    }
+
+    return result;
   }
 
   /**

@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { DriverService } from '@/services/delivery/DriverService';
+import { NotificationService } from '@/services/notifications/NotificationService';
 import type { AssignDriverInput, ListDeliveriesQueryInput, UpdateDeliveryStatusInput } from '@/lib/validation/delivery';
 
 /**
@@ -181,7 +182,7 @@ export class DeliveryService {
       throw new ConflictError(`note is required when marking a delivery ${input.status}.`);
     }
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.deliveryOrder.update({
         where: { id: deliveryOrderId },
         data: {
@@ -216,6 +217,14 @@ export class DeliveryService {
 
       return tx.deliveryOrder.findUniqueOrThrow({ where: { id: updated.id }, include: DELIVERY_INCLUDE });
     });
+
+    // Phase 14 — Notifications. Fired after the transaction above has
+    // already committed — see NotificationService's class header point 1.
+    // "Delivery updates" fires on every transition; recipient sourced from
+    // result.order, since DELIVERY_INCLUDE already includes it.
+    await NotificationService.sendDeliveryUpdate(organizationId, branchId, result);
+
+    return result;
   }
 
   private static async assertBranchInOrg(organizationId: string, branchId: string) {
