@@ -553,10 +553,14 @@ export class InventoryService {
 
   static async listPurchaseOrders(organizationId: string, branchId: string, query: ListPurchaseOrdersQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.purchaseOrder.findMany({
       where: { organizationId, branchId, status: query.status },
       include: { items: { include: { ingredient: true, unit: true } }, supplier: true },
       orderBy: { createdAt: 'desc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 
@@ -810,10 +814,14 @@ export class InventoryService {
 
   static async listStockCounts(organizationId: string, branchId: string, query: ListStockCountsQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.stockCount.findMany({
       where: { organizationId, branchId, status: query.status },
       include: { items: { include: { inventoryItem: { include: INVENTORY_ITEM_INCLUDE } } } },
       orderBy: { createdAt: 'desc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 

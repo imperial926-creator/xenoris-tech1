@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const ACCOUNT_TYPES = ['ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'COGS', 'EXPENSE'] as const;
 export const DEBIT_CREDIT = ['DEBIT', 'CREDIT'] as const;
@@ -94,7 +95,7 @@ export const listJournalEntriesQuerySchema = z.object({
   accountId: z.string().trim().min(1).optional(),
   from: z.string().trim().min(1).optional(),
   to: z.string().trim().min(1).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListJournalEntriesQueryInput = z.infer<typeof listJournalEntriesQuerySchema>;
 
 export const reverseJournalEntrySchema = z.object({
@@ -161,7 +162,7 @@ export const listExpensesQuerySchema = z.object({
   approvalStatus: z.enum(EXPENSE_APPROVAL_STATUSES).optional(),
   categoryId: z.string().trim().min(1).optional(),
   vendorId: z.string().trim().min(1).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListExpensesQueryInput = z.infer<typeof listExpensesQuerySchema>;
 
 export const addExpenseAttachmentSchema = z.object({

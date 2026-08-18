@@ -13,6 +13,8 @@ export async function GET(request: NextRequest) {
     const query = listCustomersQuerySchema.parse({
       status: searchParams.get('status') ?? undefined,
       search: searchParams.get('search') ?? undefined,
+      take: searchParams.get('take') ?? undefined,
+      skip: searchParams.get('skip') ?? undefined,
     });
     const customers = await CustomerService.list(session.organizationId, query);
     return NextResponse.json({ customers });

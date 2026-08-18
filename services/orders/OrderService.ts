@@ -53,6 +53,12 @@ export class OrderService {
       where: { organizationId, branchId, status: query.status, type: query.type },
       include: ORDER_INCLUDE,
       orderBy: { createdAt: 'desc' },
+      // Phase 15 hardening: bounded (previously unbounded — see
+      // docs/architecture.md § 23) so a branch with years of order history
+      // can't return its entire order table (with full items/payments
+      // includes) to the browser in one response.
+      take: query.take,
+      skip: query.skip,
     });
   }
 

@@ -43,7 +43,11 @@ export class CustomerService {
         { phone: { contains: s, mode: 'insensitive' } },
       ];
     }
-    return prisma.customer.findMany({ where, orderBy: { createdAt: 'desc' } });
+    // Phase 15 hardening: bounded (previously unbounded, and org-wide
+    // rather than branch-scoped — the widest-blast-radius unbounded list
+    // in this codebase for a multi-branch org with a large customer base;
+    // see docs/architecture.md § 23).
+    return prisma.customer.findMany({ where, orderBy: { createdAt: 'desc' }, take: query.take, skip: query.skip });
   }
 
   static async get(organizationId: string, customerId: string) {

@@ -865,7 +865,13 @@ model Order {
   reviews       CustomerReview[]
 
   @@index([organizationId])
+  // [branchId, createdAt] serves OrderService.list when status/type are
+  // omitted (the common "all orders" board view); Phase 15 hardening adds
+  // [branchId, status, createdAt] alongside it (not a replacement) for the
+  // equally common status-filtered board queries (e.g. status: 'PENDING'),
+  // which the 2-column index can't serve via a leftmost-prefix scan.
   @@index([branchId, createdAt])
+  @@index([branchId, status, createdAt])
   @@index([customerUserId])
   @@index([customerId])
   @@index([tableId])
@@ -2327,6 +2333,11 @@ model JournalEntry {
   @@index([branchId])
   @@index([periodId])
   @@index([referenceType, referenceId])
+  // Phase 15 hardening: AccountingService.listJournalEntries always filters
+  // by organizationId and sorts/range-filters by entryDate — no prior index
+  // covered entryDate at all, so that query fell back to a full org-scoped
+  // scan plus sort.
+  @@index([organizationId, entryDate])
   @@map("journal_entries")
 }
 
@@ -2573,7 +2584,12 @@ model Notification {
   branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   @@index([organizationId, type])
-  @@index([organizationId, createdAt])
+  // Phase 15 hardening: replaced the old [organizationId, createdAt] index —
+  // every real call site (NotificationService.list) filters by
+  // organizationId AND branchId together, never organizationId alone, so a
+  // 3-column index serves that query directly while still covering any
+  // future organizationId-only lookup via the leftmost-prefix rule.
+  @@index([organizationId, branchId, createdAt])
   @@index([relatedEntityType, relatedEntityId])
   @@map("notifications")
 }

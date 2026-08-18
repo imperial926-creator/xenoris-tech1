@@ -131,9 +131,13 @@ export class CateringService {
 
   static async listInquiries(organizationId: string, branchId: string, query: ListCateringInquiriesQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.cateringInquiry.findMany({
       where: { organizationId, branchId, status: query.status },
       orderBy: { createdAt: 'desc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 
@@ -245,10 +249,14 @@ export class CateringService {
 
   static async listQuotes(organizationId: string, branchId: string, query: ListCateringQuotesQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.cateringQuote.findMany({
       where: { organizationId, branchId, status: query.status, inquiryId: query.inquiryId },
       include: QUOTE_INCLUDE,
       orderBy: { createdAt: 'desc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 
@@ -496,10 +504,14 @@ export class CateringService {
 
   static async listEvents(organizationId: string, branchId: string, query: ListCateringEventsQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.cateringEvent.findMany({
       where: { organizationId, branchId, status: query.status },
       include: EVENT_INCLUDE,
       orderBy: { eventDate: 'asc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 

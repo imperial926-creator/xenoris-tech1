@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const CATERING_INQUIRY_STATUSES = ['NEW', 'QUOTED', 'CONVERTED', 'CANCELLED'] as const;
 export const CATERING_QUOTE_STATUSES = ['DRAFT', 'SENT', 'VIEWED', 'ACCEPTED', 'REJECTED', 'EXPIRED', 'CANCELLED'] as const;
@@ -120,16 +121,16 @@ export type RecordCateringPaymentInput = z.infer<typeof recordCateringPaymentSch
 
 export const listCateringInquiriesQuerySchema = z.object({
   status: z.enum(CATERING_INQUIRY_STATUSES).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListCateringInquiriesQueryInput = z.infer<typeof listCateringInquiriesQuerySchema>;
 
 export const listCateringQuotesQuerySchema = z.object({
   status: z.enum(CATERING_QUOTE_STATUSES).optional(),
   inquiryId: z.string().trim().min(1).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListCateringQuotesQueryInput = z.infer<typeof listCateringQuotesQuerySchema>;
 
 export const listCateringEventsQuerySchema = z.object({
   status: z.enum(CATERING_EVENT_STATUSES).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListCateringEventsQueryInput = z.infer<typeof listCateringEventsQuerySchema>;

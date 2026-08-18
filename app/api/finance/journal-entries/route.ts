@@ -16,6 +16,8 @@ export async function GET(request: NextRequest) {
       accountId: searchParams.get('accountId') ?? undefined,
       from: searchParams.get('from') ?? undefined,
       to: searchParams.get('to') ?? undefined,
+      take: searchParams.get('take') ?? undefined,
+      skip: searchParams.get('skip') ?? undefined,
     });
     const entries = await AccountingService.listJournalEntries(session.organizationId, query);
     return NextResponse.json({ entries });

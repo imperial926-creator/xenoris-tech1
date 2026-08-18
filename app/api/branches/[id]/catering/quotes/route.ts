@@ -13,6 +13,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     const query = listCateringQuotesQuerySchema.parse({
       status: searchParams.get('status') ?? undefined,
       inquiryId: searchParams.get('inquiryId') ?? undefined,
+      take: searchParams.get('take') ?? undefined,
+      skip: searchParams.get('skip') ?? undefined,
     });
     const quotes = await CateringService.listQuotes(session.organizationId, params.id, query);
     return NextResponse.json({ quotes });

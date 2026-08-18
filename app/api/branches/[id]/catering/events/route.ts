@@ -10,7 +10,11 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CATERING_MANAGE);
     const { searchParams } = new URL(request.url);
-    const query = listCateringEventsQuerySchema.parse({ status: searchParams.get('status') ?? undefined });
+    const query = listCateringEventsQuerySchema.parse({
+      status: searchParams.get('status') ?? undefined,
+      take: searchParams.get('take') ?? undefined,
+      skip: searchParams.get('skip') ?? undefined,
+    });
     const events = await CateringService.listEvents(session.organizationId, params.id, query);
     return NextResponse.json({ events });
   } catch (error) {

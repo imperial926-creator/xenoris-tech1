@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const CUSTOMER_STATUSES = ['ACTIVE', 'INACTIVE', 'BLOCKED'] as const;
 
@@ -69,5 +70,5 @@ export type CreateCustomerReviewInput = z.infer<typeof createCustomerReviewSchem
 export const listCustomersQuerySchema = z.object({
   status: z.enum(CUSTOMER_STATUSES).optional(),
   search: z.string().trim().min(1).max(150).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListCustomersQueryInput = z.infer<typeof listCustomersQuerySchema>;

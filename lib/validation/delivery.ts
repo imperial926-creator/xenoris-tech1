@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const DELIVERY_STATUSES = ['UNASSIGNED', 'ASSIGNED', 'PICKED_UP', 'DELIVERED', 'FAILED', 'CANCELLED'] as const;
 
@@ -53,5 +54,5 @@ export type UpdateDeliveryStatusInput = z.infer<typeof updateDeliveryStatusSchem
 
 export const listDeliveriesQuerySchema = z.object({
   status: z.enum(DELIVERY_STATUSES).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListDeliveriesQueryInput = z.infer<typeof listDeliveriesQuerySchema>;

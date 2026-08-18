@@ -14,6 +14,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       status: searchParams.get('status') ?? undefined,
       from: searchParams.get('from') ?? undefined,
       to: searchParams.get('to') ?? undefined,
+      take: searchParams.get('take') ?? undefined,
+      skip: searchParams.get('skip') ?? undefined,
     });
     const reservations = await ReservationService.list(session.organizationId, params.id, query);
     return NextResponse.json({ reservations });

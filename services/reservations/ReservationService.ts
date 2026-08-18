@@ -97,6 +97,10 @@ export class ReservationService {
       },
       include: RESERVATION_INCLUDE,
       orderBy: { startAt: 'asc' },
+      // Phase 15 hardening: bounded (previously unbounded when neither
+      // from/to filter was supplied) — see docs/architecture.md § 23.
+      take: query.take,
+      skip: query.skip,
     });
   }
 

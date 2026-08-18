@@ -13,6 +13,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     const query = listOrdersQuerySchema.parse({
       status: searchParams.get('status') ?? undefined,
       type: searchParams.get('type') ?? undefined,
+      take: searchParams.get('take') ?? undefined,
+      skip: searchParams.get('skip') ?? undefined,
     });
     const orders = await OrderService.list(session.organizationId, params.id, query);
     return NextResponse.json({ orders });

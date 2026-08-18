@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const ORDER_TYPES = ['DINE_IN', 'TAKEOUT', 'DELIVERY'] as const;
 export const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'COMPLETED', 'CANCELLED'] as const;
@@ -76,5 +77,5 @@ export type VoidInvoiceInput = z.infer<typeof voidInvoiceSchema>;
 export const listOrdersQuerySchema = z.object({
   status: z.enum(ORDER_STATUSES).optional(),
   type: z.enum(ORDER_TYPES).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListOrdersQueryInput = z.infer<typeof listOrdersQuerySchema>;

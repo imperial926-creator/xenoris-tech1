@@ -44,10 +44,14 @@ const DELIVERY_INCLUDE = {
 export class DeliveryService {
   static async list(organizationId: string, branchId: string, query: ListDeliveriesQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.deliveryOrder.findMany({
       where: { organizationId, branchId, status: query.status },
       include: DELIVERY_INCLUDE,
       orderBy: { createdAt: 'desc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const INVENTORY_TRANSACTION_TYPES = [
   'PURCHASE',
@@ -220,7 +221,7 @@ export type CancelPurchaseOrderInput = z.infer<typeof cancelPurchaseOrderSchema>
 
 export const listPurchaseOrdersQuerySchema = z.object({
   status: z.enum(PURCHASE_ORDER_STATUSES).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListPurchaseOrdersQueryInput = z.infer<typeof listPurchaseOrdersQuerySchema>;
 
 // ---------------------------------------------------------------------------
@@ -243,5 +244,5 @@ export type CompleteStockCountInput = z.infer<typeof completeStockCountSchema>;
 
 export const listStockCountsQuerySchema = z.object({
   status: z.enum(STOCK_COUNT_STATUSES).optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListStockCountsQueryInput = z.infer<typeof listStockCountsQuerySchema>;

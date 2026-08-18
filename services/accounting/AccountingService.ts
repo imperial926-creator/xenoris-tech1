@@ -278,6 +278,11 @@ export class AccountingService {
       },
       include: JOURNAL_ENTRY_INCLUDE,
       orderBy: { entryDate: 'desc' },
+      // Phase 15 hardening: bounded (previously unbounded — journal-entry
+      // volume grows monotonically and is never pruned; see
+      // docs/architecture.md § 23).
+      take: query.take,
+      skip: query.skip,
     });
   }
 
@@ -603,10 +608,14 @@ export class AccountingService {
 
   static async listExpenses(organizationId: string, branchId: string, query: ListExpensesQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
+    // Phase 15 hardening: bounded (previously unbounded — see
+    // docs/architecture.md § 23).
     return prisma.expense.findMany({
       where: { organizationId, branchId, approvalStatus: query.approvalStatus, categoryId: query.categoryId, vendorId: query.vendorId },
       include: { vendor: true, category: true, attachments: true },
       orderBy: { expenseDate: 'desc' },
+      take: query.take,
+      skip: query.skip,
     });
   }
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { paginationQuerySchema } from '@/lib/validation/pagination';
 
 export const RESERVATION_STATUSES = [
   'PENDING',
@@ -75,5 +76,5 @@ export const listReservationsQuerySchema = z.object({
   status: z.enum(RESERVATION_STATUSES).optional(),
   from: z.string().optional(),
   to: z.string().optional(),
-});
+}).merge(paginationQuerySchema);
 export type ListReservationsQueryInput = z.infer<typeof listReservationsQuerySchema>;
