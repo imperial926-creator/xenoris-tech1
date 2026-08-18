@@ -113,13 +113,17 @@ response. Financial and inventory calculations are never trusted from the client
 
 ## Deployment Rules
 
-- Application: Vercel or equivalent Next.js host.
+- Application: Vercel or equivalent Next.js host — see `docs/deployment/` (Phase 16) for the full
+  provider-agnostic runbook.
 - Database: managed PostgreSQL (not the local dev instance).
-- File storage: S3-compatible.
-- Payments, email, SMS, push, and AI providers are all abstracted behind an interface
-  (`lib/payments`, `lib/notifications`, `lib/ai`) — no provider is hard-coded. Until a provider is
-  configured via environment variables, the integration must clearly report
-  "Integration requires configuration" rather than fake success.
+- File storage: S3-compatible, abstracted behind `lib/storage/StorageProvider.ts` (Phase 16) — no
+  real upload exists yet, same "no fake integrations" rule as every other provider seam.
+- Payments, email, SMS, push, storage, error-reporting, and AI providers are all abstracted behind
+  an interface (`lib/payments`, `lib/notifications`, `lib/storage`, `lib/monitoring/
+  ErrorReporter.ts`, `lib/ai`) — no provider is hard-coded. Until a provider is configured via
+  environment variables, the integration must clearly report "Integration requires configuration"
+  rather than fake success — except `ErrorReporter`, which no-ops rather than throwing (see that
+  file's header for why error-handling code must never itself throw).
 
 ## Current Implementation Status
 
@@ -1162,7 +1166,64 @@ response. Financial and inventory calculations are never trusted from the client
   7. Risks as a Phase 15 revisit item — this pass's tenant-isolation work was the defense-in-depth
   query-scoping fixes above, not RLS; RLS itself remains a flagged, deferred item).
 
-**Not yet built** (Phase 16 per `docs/architecture.md`): deployment.
+**Phase 16 — Deployment: done. This is the final phase of the master build spec — all 16 phases
+are now implemented.**
+
+- Master spec §60's exact deploy sequence (`Production database → Database migrations →
+  Environment variables → Application deployment → Domain configuration → HTTPS → Monitoring →
+  Backups`) turned into an actionable runbook: `docs/deployment/README.md` (index + §59
+  provider-agnostic-architecture recap), `production-checklist.md` (the sequence as a checklist),
+  `backups.md`, `rollback.md` (both explicitly required by §60), `monitoring.md`, `domain-https.md`.
+- **The last unconfigured-provider seam closed**: `lib/storage/StorageProvider.ts` — same
+  `Unconfigured*Provider` + `get*Provider()` factory pattern as Payment/Email/SMS/Push/AI, reading
+  `STORAGE_PROVIDER_KEY` (reserved since Phase 1, never previously given an interface file).
+  Cross-references the two existing metadata-only storage forward-references
+  (`ExpenseAttachment.fileUrl`, delivery proof-of-delivery) that already anticipated this file.
+- **Eager, fail-fast environment validation**: `lib/config/env.ts` (Zod schema for `DATABASE_URL`/
+  `AUTH_SECRET`/`APP_URL`) wired via `instrumentation.ts`'s Next.js `register()` hook — a
+  misconfigured production process now refuses to boot instead of failing on its first real
+  request. Deliberately does not require the optional provider-key vars — every `get*Provider()`
+  factory already degrades correctly when one is unset, so requiring them here would contradict
+  the whole provider-agnostic design. Complements, does not replace, `lib/auth/session.ts`'s
+  existing lazy `AUTH_SECRET` check.
+- **Observability (§63)**: `lib/monitoring/logger.ts` — structured JSON logger with recursive
+  key-pattern redaction (passwords/secrets/tokens/auth headers/cookies/card & bank/government-ID
+  -shaped fields), now the only module allowed to call `console.*` directly. `lib/monitoring/
+  ErrorReporter.ts` — same provider-agnostic seam shape, with one deliberate deviation from every
+  other `Unconfigured*Provider`: it no-ops instead of throwing, since throwing from inside
+  error-handling code is worse than not reporting (the structured logger already durably records
+  every error regardless). Wired into `lib/utils/api-error.ts`'s catch-all (replacing its one
+  pre-existing raw `console.error`), `NotificationService`'s email/SMS dispatch failures, and
+  `InventoryService.consumeForOrder`'s previously-silent incompatible-unit-conversion guard.
+- **`/api/health`**: unauthenticated liveness/readiness endpoint, round-trips the database
+  (`SELECT 1`), used by `Dockerfile`'s `HEALTHCHECK` and meant for an external uptime monitor /
+  load balancer health check.
+- **App builds**: `Dockerfile` (multi-stage, `next.config.js`'s new `output: 'standalone'`, non-root
+  user, built-in `HEALTHCHECK`) + `.dockerignore`; `.github/workflows/ci.yml` (typecheck+lint,
+  test against a real Postgres service container with migrations applied, build — three jobs,
+  build gated on the other two passing).
+- **PWA (§62)**: `public/manifest.json` + generated icon set (`public/icons/`,
+  `public/favicon.ico`) + `app/layout.tsx` metadata/viewport wiring — installable on a kitchen
+  display or server's tablet per §62's explicit tablet use case. §61's native mobile app strategy
+  was never triggered in this build (responsive-first throughout, by design) — literal native
+  App Store/Play Store submission is explicitly N/A, documented in `docs/deployment/README.md`.
+- **Backups**: `scripts/backup-db.sh` / `scripts/restore-db.sh` — `pg_dump`/`pg_restore` wrappers,
+  provider-agnostic (works against any Postgres `DATABASE_URL`, not a specific cloud provider's
+  proprietary backup API), with a restore confirmation guard and a documented restore-drill
+  checklist in `docs/deployment/backups.md`.
+- Tests: `tests/unit/config/env.test.ts` (every validation branch, including "reports every
+  problem at once"), `tests/unit/monitoring/logger.test.ts` (redaction across nesting/arrays/
+  circular references/Date serialization, plus a console-spy smoke test per log level) — both
+  pure-function tests needing no database, same split as every prior phase's unit-test layer.
+- Verified via `tsc --noEmit` diagnostic diff against the Phase 15 baseline: new diagnostics are
+  entirely line-number shifts in touched files plus the expected new-file artifact noise (missing
+  `next`/`zod`/`vitest` type declarations, `process`/`Buffer` without `@types/node` — see Known
+  Issues below), all within this sandbox's already-established artifact categories; zero new
+  diagnostics outside them.
+- Like every other phase, **not runtime-verified** — no network access in this sandbox to `docker
+  build`, run `.github/workflows/ci.yml`, or exercise a real domain/HTTPS/managed-Postgres/backup
+  cycle end-to-end. Every file in `docs/deployment/` says so explicitly and should be treated as
+  reviewed-but-unrun.
 
 ## Known Issues / Environment Constraints
 
@@ -1583,4 +1644,8 @@ response. Financial and inventory calculations are never trusted from the client
 ## Required Environment Variables
 
 See `.env.example` for the full list. Minimum to run Phase 1 locally:
-`DATABASE_URL`, `AUTH_SECRET`, `APP_URL`.
+`DATABASE_URL`, `AUTH_SECRET`, `APP_URL`. As of Phase 16, these three are validated eagerly at
+server boot (`lib/config/env.ts` via `instrumentation.ts`) — a production process with any of them
+missing/malformed refuses to start rather than failing on its first request. Every other var in
+`.env.example` is an optional provider key; leaving one unset degrades that feature to a documented
+"not configured" state instead of failing startup.

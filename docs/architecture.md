@@ -110,16 +110,16 @@ branch.
 4. Orders: dine-in, take-out, delivery, payments, invoices — **done**
 5. Kitchen display system — **done**
 6. Delivery: zones, drivers, assignment, tracking — **done**
-7. Catering: inquiry → quote → accept → deposit → event → final payment — **done, this pass**
-8. CRM: profiles, history, RFM segmentation, lifetime value
-9. Inventory: ingredients, recipes, purchasing, stock, waste, COGS integration
-10. Accounting: chart of accounts, journal entries, double-entry ledger, deposits, reversals
-11. Financial reporting: income statement, balance sheet, cash flow, trial balance
-12. Owner analytics dashboards
-13. AI business intelligence (read-only analytics tools only)
-14. Notifications: email, push, SMS abstraction
-15. Hardening: security/performance/accessibility/financial-integrity review
-16. Deployment: production DB, migrations, backups, monitoring, domain, HTTPS, app builds
+7. Catering: inquiry → quote → accept → deposit → event → final payment — **done**
+8. CRM: profiles, history, RFM segmentation, lifetime value — **done**
+9. Inventory: ingredients, recipes, purchasing, stock, waste, COGS integration — **done**
+10. Accounting: chart of accounts, journal entries, double-entry ledger, deposits, reversals — **done**
+11. Financial reporting: income statement, balance sheet, cash flow, trial balance — **done**
+12. Owner analytics dashboards — **done**
+13. AI business intelligence (read-only analytics tools only) — **done**
+14. Notifications: email, push, SMS abstraction — **done**
+15. Hardening: security/performance/accessibility/financial-integrity review — **done**
+16. Deployment: production DB, migrations, backups, monitoring, domain, HTTPS, app builds — **done, final phase**
 
 Each phase follows: explain → identify affected tables/APIs/security implications/tests → implement →
 test → typecheck/lint → review → update docs → commit.
@@ -146,13 +146,20 @@ test → typecheck/lint → review → update docs → commit.
 
 ## 8. Required External Integrations (all currently unconfigured, by design)
 
-- Payment provider (PH market: e.g. PayMongo, Maya, Stripe — decision needed)
-- Transactional email provider
-- SMS provider
-- Push notification provider
-- S3-compatible object storage
+Every entry below has a corresponding `Unconfigured*Provider` seam (interface + throwing stub +
+`get*Provider()` factory) already written — see the referenced file. None is a missing capability;
+each is a deliberate "no fake integrations" stub, per §59, waiting on a business decision plus real
+credentials, not more code.
+
+- Payment provider (PH market: e.g. PayMongo, Maya, Stripe — decision needed) — `lib/payments/PaymentProvider.ts`
+- Transactional email provider — `lib/notifications/EmailProvider.ts`
+- SMS provider — `lib/notifications/SmsProvider.ts`
+- Push notification provider — `lib/notifications/PushProvider.ts`
+- S3-compatible object storage — `lib/storage/StorageProvider.ts` (Phase 16)
 - Maps/geocoding API (delivery zones/driver navigation)
-- AI provider (business intelligence layer, read-only access only)
+- AI provider (business intelligence layer, read-only access only) — `lib/ai/AIProvider.ts`
+- Error-tracking provider (§63 Observability) — `lib/monitoring/ErrorReporter.ts` (Phase 16;
+  unlike the others, its stub no-ops rather than throws — see that file's header)
 
 ## 9. What Was Implemented First
 
@@ -1287,3 +1294,108 @@ a fix to code from Phases 1–14 or a new small shared primitive (`lib/security/
 either already scheduled for a distinct future phase (RLS, a real payment/storage provider),
 requires a decision this build cannot make unilaterally (nonce-based CSP's build-tooling change,
 a distributed rate-limit store choice), or was investigated and confirmed correct as-is.
+
+## 24. Phase 16 — Deployment (final phase)
+
+The master spec's "PHASE 16 — DEPLOYMENT" build list (Production configuration / Database
+migrations / Backups / Monitoring / Domain / HTTPS / App builds / Store configuration) plus §59
+"Deployment Architecture," §60 "Production Deployment," §61 "Mobile Strategy," §62 "PWA," and §63
+"Observability." This is the last phase of the master spec — with it, all 16 phases are
+implemented.
+
+**Scope grounding.** §59 requires the architecture stay provider-agnostic wherever possible ("Do
+not hard-code any specific provider if the architecture can remain provider-agnostic"), so this
+phase's job was closing configuration *seams*, not standing up real infrastructure this sandbox
+has no network access to reach anyway (no live domain, no managed Postgres/S3, no CI runner — see
+`CLAUDE.md` → Known Issues). §60's sequence diagram (`Production database → Database migrations →
+Environment variables → Application deployment → Domain configuration → HTTPS → Monitoring →
+Backups`) became `docs/deployment/production-checklist.md`, one step per checklist item, plus its
+two explicit extra deliverables: `docs/deployment/rollback.md` and `docs/deployment/backups.md`.
+
+**The last unconfigured-provider seam.** `STORAGE_PROVIDER_KEY` had been reserved in
+`.env.example` since Phase 1 — every other provider category (payments, email/SMS/push, AI) got an
+interface file in its introducing phase; storage never did, because nothing in this build has ever
+needed to actually accept a file upload. Two existing forward-references already anticipated this
+file: `ExpenseAttachment.fileUrl` (Phase 10 — records where a receipt *would* live once storage is
+configured, metadata-only today) and the Phase 6 delivery proof-of-delivery note (a staff-entered
+text note, deliberately not a photo, because no object storage provider is configured — see § 14
+above). `lib/storage/StorageProvider.ts` closes the seam with the identical shape as every other
+provider: an interface, an `UnconfiguredStorageProvider` that throws unconditionally when called,
+and a `getStorageProvider()` factory that currently always returns the stub.
+
+**Eager environment validation.** `lib/auth/session.ts`'s `getSecretKey()` has validated
+`AUTH_SECRET` since Phase 1 — but lazily, only on the first session sign/verify, meaning a
+misconfigured production process could serve a fair amount of traffic before its first login
+attempt crashes. `lib/config/env.ts` (a Zod schema over `DATABASE_URL`/`AUTH_SECRET`/`APP_URL`)
+plus `instrumentation.ts` (Next.js's `register()` server-boot hook) makes this eager instead: the
+process now refuses to start at all with a bad config, reporting every problem at once rather than
+one at a time as each is first exercised. Deliberately scoped to only the three vars this app
+cannot run without — every optional provider key already has its own graceful "unconfigured"
+fallback, and requiring them at boot would contradict §59's provider-agnostic design.
+
+**Observability (§63).** Before this phase, the entire codebase had exactly one `console.*` call
+— a catch-all `console.error` in `lib/utils/api-error.ts` — and at least one other spot
+(`InventoryService.consumeForOrder`'s incompatible-unit-conversion guard) silently swallowed an
+error with no trace at all. `lib/monitoring/logger.ts` is a structured JSON logger with recursive
+key-pattern redaction covering §63's explicit denylist (passwords, payment secrets, auth tokens)
+plus this codebase's own other sensitive-field conventions (card/bank numbers, government IDs,
+session identifiers); it is now the only module permitted to call `console.*` directly.
+`lib/monitoring/ErrorReporter.ts` follows the same provider-agnostic shape as every other
+integration, with one intentional exception to the "throw when unconfigured" rule every other
+stub follows: it no-ops instead, because a throw from inside error-handling code risks masking the
+original error or crashing a catch block that exists specifically to prevent a crash — the
+structured logger already durably records every error regardless of whether a reporting provider
+is configured, so the no-op loses nothing. Both are wired into the three previously-silent-or-raw
+call sites named above.
+
+**`/api/health`.** An unauthenticated liveness/readiness endpoint (deliberately unauthenticated —
+it's infra-facing, meant for a load balancer, Docker `HEALTHCHECK`, or an external uptime monitor,
+none of which carry a session cookie) that round-trips the database with a trivial `SELECT 1`, so a
+green response means both the app process and its DB connection are healthy. Still subject to
+`middleware.ts`'s general `/api/*` rate limit (defense-in-depth only — 120 req/min comfortably
+exceeds any real health-check interval).
+
+**App builds.** `next.config.js` gained `output: 'standalone'` (a minimal, self-contained server
+bundle — see `Dockerfile`'s comments) and `poweredByHeader: false`, plus `experimental.
+instrumentationHook: true` to enable the `register()` hook above (flagged as unverified whether
+this exact Next 14.2.5 pin still requires the flag or already stabilized it — harmless either way,
+see that file's comment). `Dockerfile` is a three-stage build (deps → builder → runner) producing a
+non-root, minimal runtime image with a built-in `HEALTHCHECK` against `/api/health`; migrations are
+deliberately NOT run from its `CMD` (see the file's header — that would race every replica of a
+multi-instance deploy against each other; migrations are a distinct pre-deploy step per §60).
+`.github/workflows/ci.yml` runs typecheck+lint, tests against a real ephemeral Postgres service
+container with migrations applied, and a production build — three jobs, the build gated on the
+other two passing.
+
+**PWA and mobile strategy (§61, §62).** §61's native mobile app is explicitly conditional ("if
+required") and was never triggered anywhere in this build — every phase's dashboard UI has been
+responsive-first from Phase 1 onward, and no Expo/React Native project exists. §62's PWA guidance
+is narrower and *is* applicable: "Staff dashboards should work well on tablets. Kitchen interface
+should work well on large displays/tablets." `public/manifest.json` (+ a generated icon set —
+`public/icons/`, `public/favicon.ico` — and `app/layout.tsx`'s metadata/viewport wiring) makes the
+dashboard installable to a kitchen display's or server's tablet home screen, launching standalone
+without browser chrome. This resolves Phase 16's "Store configuration" build-list bullet as: PWA
+installability, yes; literal native App Store/Play Store submission, explicitly not
+applicable — there is no native binary to submit, consistent with §61 never firing.
+
+**Backups.** `scripts/backup-db.sh` / `scripts/restore-db.sh` wrap `pg_dump`/`pg_restore` against
+whatever `DATABASE_URL` points at — provider-agnostic by construction, since they never touch a
+cloud provider's proprietary backup API. `restore-db.sh` requires typing the target database name
+before proceeding, since a restore is destructive (`--clean --if-exists`). Retention guidance and a
+restore-drill checklist live in `docs/deployment/backups.md` rather than in the scripts themselves,
+since retention policy is an operational decision, not a mechanical one.
+
+**Tests.** `tests/unit/config/env.test.ts` and `tests/unit/monitoring/logger.test.ts` — both pure
+-function tests needing no database, same "pure logic → unit test, DB-touching → integration test"
+split this codebase has followed since Phase 1. Verified via the same `tsc --noEmit` diagnostic
+-diff discipline as every prior phase: diffed against a Phase 15 baseline (3361 diagnostics),
+landing at 3381 — every new line is either a line-number shift in a file this phase touched, or new
+-file noise inside the sandbox's already-established artifact categories (missing `next`/`zod`/
+`vitest` type declarations, `process`/`Buffer` without `@types/node`), never a new category.
+
+**What Phase 16 deliberately does not do.** Actually provision a domain, TLS certificate, managed
+Postgres instance, or CI runner — none of that is reachable from this sandbox, and none of it is
+this phase's job under §59's provider-agnostic framing; the job was making sure the *codebase* is
+ready for whoever does that, which `docs/deployment/` documents step by step. Like every phase
+before it, nothing here has been runtime-verified — `docs/deployment/README.md` says so explicitly
+and should be treated as reviewed-but-unrun until exercised in a real environment.

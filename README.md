@@ -4,7 +4,7 @@ Production restaurant management, booking, catering, ordering, CRM & financial i
 platform. See `CLAUDE.md` for the full architecture/status record and `docs/architecture.md` /
 `docs/database.md` for details. This README covers local setup only.
 
-**Status:** Phase 0 (discovery), Phase 1 (foundation: auth, RBAC, organizations, branches),
+**Status: all 16 phases complete.** Phase 0 (discovery), Phase 1 (foundation: auth, RBAC, organizations, branches),
 Phase 2 (restaurant configuration: tables, sections, business hours, menu, modifiers), Phase 3
 (reservations: availability search, booking, deposits, status lifecycle, DB-enforced
 double-booking prevention), Phase 4 (orders: dine-in/take-out/delivery, server-computed pricing,
@@ -41,8 +41,15 @@ limiting, secure headers, pagination on 11 previously-unbounded list endpoints, 
 indexes, keyboard focus/labeling gaps, Branch delete-cascade → restrict on financial tables, new
 CHECK constraints, four concurrency races converted to atomic guarded updates, and a set of API
 response-shape inconsistencies — see `docs/architecture.md` § 23 for the full audit-to-fix
-narrative, including what was deliberately left unchanged) are implemented. Everything else
-(deployment) is not built yet — see `docs/architecture.md` for the phase order.
+narrative, including what was deliberately left unchanged), and Phase 16 (deployment: a
+provider-agnostic Dockerfile and CI workflow, eager fail-fast environment validation at boot, a
+structured logger and error-reporting seam, an unauthenticated `/api/health` check, a
+`StorageProvider` abstraction closing the last unconfigured-integration seam, database
+backup/restore scripts, an installable PWA manifest for staff/kitchen tablets, and a full
+`docs/deployment/` runbook covering the production deploy sequence, rollback, backups, monitoring,
+and domain/HTTPS setup) are all implemented — see `docs/architecture.md` § 24 and `CLAUDE.md` →
+Current Implementation Status for the full Phase 16 narrative, and `docs/deployment/README.md` to
+actually deploy this.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or
@@ -122,8 +129,36 @@ npm run build          # production build
 npm run db:studio     # Prisma Studio (visual DB browser)
 ```
 
+## Deployment
+
+See `docs/deployment/README.md` for the full production runbook (production checklist, backups,
+rollback, monitoring, domain/HTTPS), or for a quick local Docker smoke test:
+
+```bash
+docker build -t restaurant-platform .
+docker run --rm -p 3000:3000 --env-file .env restaurant-platform
+curl http://localhost:3000/api/health
+```
+
 ## Project layout
 
-See `docs/architecture.md` § "Folder Structure" for the full target layout. Directories for
-features not yet built contain a `.gitkeep` placeholder pointing back to their implementation
-phase — this is intentional scaffolding, not missing files.
+See `docs/architecture.md` § "Folder Structure" for the full target layout. Directories whose
+implementation ended up living exactly where originally scaffolded had their placeholder
+`.gitkeep` removed as part of Phase 16's final pass (e.g. `services/accounting/`,
+`app/api/finance/`, `public/`). A few `.gitkeep` files remain and are accurate, not stale:
+
+- `app/(customer)/**` and `components/customer/` — the public customer-facing self-service app
+  (browsing the menu, booking, ordering, and tracking catering without staff involvement) was
+  deliberately scoped out starting in Phase 3 (see that phase's notes in `CLAUDE.md`) in favor of
+  the staff-side dashboard this build focuses on, and was never revisited in a later phase.
+- `app/api/inventory/`, `app/api/payments/`, `lib/accounting/`, `lib/analytics/`,
+  `services/payments/`, `tests/accounting/` — these features were built, but their real
+  implementation ended up organized under different paths than originally scaffolded (inventory's
+  API surface lives under `app/api/{ingredients,recipes,units,suppliers}/` +
+  `app/api/branches/[id]/inventory/`; payment recording lives under
+  `app/api/branches/[id]/orders/[orderId]/payments` and
+  `app/api/branches/[id]/catering/events/[eventId]/payments`, inside `OrderService`/
+  `CateringService` rather than a standalone service; accounting validation
+  lives in `lib/validation/accounting.ts`; analytics lives in `services/analytics/` +
+  `app/api/analytics/`). The original scaffold directories were left as-is rather than retroactively
+  reorganized once the actual shape became clear.
