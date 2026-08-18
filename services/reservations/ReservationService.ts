@@ -57,7 +57,7 @@ export class ReservationService {
   ) {
     await this.assertBranchInOrg(organizationId, branchId);
     const { startAt, endAt } = this.resolveWindow(query.startAt, query.durationMinutes);
-    await this.assertWithinBusinessHours(branchId, startAt, endAt);
+    await this.assertWithinBusinessHours(organizationId, branchId, startAt, endAt);
 
     return prisma.restaurantTable.findMany({
       where: {
@@ -143,7 +143,7 @@ export class ReservationService {
       // that started a few seconds before submission doesn't get rejected.
       throw new ConflictError('Reservation start time cannot be in the past.');
     }
-    await this.assertWithinBusinessHours(branchId, startAt, endAt);
+    await this.assertWithinBusinessHours(organizationId, branchId, startAt, endAt);
 
     const tables = await prisma.restaurantTable.findMany({
       where: { id: { in: input.tableIds }, organizationId, branchId },
@@ -423,8 +423,14 @@ export class ReservationService {
    * configured for that day, the check is skipped rather than blocking
    * bookings on missing configuration.
    */
-  private static async assertWithinBusinessHours(branchId: string, startAt: Date, endAt: Date) {
-    const branch = await prisma.branch.findUnique({ where: { id: branchId } });
+  private static async assertWithinBusinessHours(organizationId: string, branchId: string, startAt: Date, endAt: Date) {
+    // Phase 15 hardening: scoped by organizationId like every other lookup
+    // in this file (previously a bare findUnique by id) — both call sites
+    // already validate branch ownership first via assertBranchInOrg, so
+    // this was not an exploitable IDOR today, but scoping every query
+    // defensively is the actual multi-tenant-isolation convention this
+    // codebase relies on rather than a single upstream gate.
+    const branch = await prisma.branch.findFirst({ where: { id: branchId, organizationId } });
     if (!branch?.openingHours) return;
 
     const hours = branch.openingHours as Record<

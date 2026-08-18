@@ -166,6 +166,14 @@ export type ListExpensesQueryInput = z.infer<typeof listExpensesQuerySchema>;
 
 export const addExpenseAttachmentSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
-  fileUrl: z.string().trim().min(1).max(2000),
+  // Phase 15 hardening: was a bare non-empty string, which would accept a
+  // `javascript:`/`data:` URL. This model is metadata-only today — there is
+  // no real upload/storage integration yet (STORAGE_PROVIDER_KEY is
+  // unconfigured, see .env.example), so nothing currently renders this
+  // value as a clickable link — but validating the shape now means a
+  // future storage integration doesn't inherit a stored-XSS-shaped hole.
+  // Restricted to https: only; real uploads will always be served from an
+  // https object-storage URL.
+  fileUrl: z.string().trim().max(2000).url().refine((v) => v.startsWith('https://'), 'fileUrl must be an https:// URL.'),
 });
 export type AddExpenseAttachmentInput = z.infer<typeof addExpenseAttachmentSchema>;

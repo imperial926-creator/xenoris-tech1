@@ -167,7 +167,7 @@ export class OrderService {
     try {
       createdOrder = await prisma.$transaction(async (tx) => {
         if (input.type === 'DINE_IN' && input.tableId) {
-          await this.seatTable(tx, input.tableId);
+          await this.seatTable(tx, organizationId, branchId, input.tableId);
         }
 
         const order = await tx.order.create({
@@ -552,11 +552,17 @@ export class OrderService {
    * or cancels — table state stays under staff control via the Tables
    * board, same boundary Phase 3 drew between reservation and table status.
    */
-  private static async seatTable(tx: Prisma.TransactionClient, tableId: string) {
+  private static async seatTable(tx: Prisma.TransactionClient, organizationId: string, branchId: string, tableId: string) {
     // Fresh read inside the transaction — not the pre-transaction snapshot
     // — so a concurrent status change is never missed under Read Committed
     // isolation (Postgres's default, which Prisma uses unless overridden).
-    const table = await tx.restaurantTable.findUniqueOrThrow({ where: { id: tableId } });
+    // Phase 15 hardening: scoped by organizationId/branchId (previously a
+    // bare findUniqueOrThrow by id) — createOrder already validates table
+    // ownership once before this transaction opens, so this was not an
+    // exploitable IDOR today, but every table read/write in this codebase
+    // is expected to carry its own tenant scope rather than trust an
+    // earlier check alone.
+    const table = await tx.restaurantTable.findFirstOrThrow({ where: { id: tableId, organizationId, branchId } });
     if (TABLE_BLOCKED_STATUSES.includes(table.status)) {
       throw new ConflictError(`Table is ${table.status.replace(/_/g, ' ').toLowerCase()} and cannot be seated.`);
     }
