@@ -36,4 +36,24 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /*
+   * Phase 15 hardening (accessibility review): the Button/Input/Select
+   * components already carry their own focus-visible ring classes, but a
+   * large number of raw <select> elements (~54 across the dashboard board
+   * components) and a handful of other unwrapped native form controls
+   * don't go through those components and so had no visible focus
+   * indicator at all — a keyboard user tabbing through a board couldn't
+   * see which control was focused. This is the single highest-leverage
+   * fix identified by the audit: one rule covers every native form
+   * control in the app, wrapped or not, without touching 50+ call sites.
+   */
+  select:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  button:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring));
+  }
 }

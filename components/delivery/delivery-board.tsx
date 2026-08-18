@@ -349,7 +349,19 @@ export function DeliveryBoard({ branches }: { branches: Branch[] }) {
 
                   {(d.status === 'UNASSIGNED' || d.status === 'ASSIGNED' || d.status === 'FAILED') && (
                     <div className="flex items-center gap-2">
+                      {/*
+                        Phase 15 hardening: this select had no label at all
+                        (visible or otherwise) — a screen reader announced
+                        it only as "combobox", with no indication it
+                        assigns a driver. d.id is already unique per row,
+                        so it doubles as a stable id for the htmlFor pair
+                        below without needing useId() inside a .map().
+                      */}
+                      <Label htmlFor={`assign-driver-${d.id}`} className="sr-only">
+                        Assign driver for order #{d.order.id.slice(-6).toUpperCase()}
+                      </Label>
                       <select
+                        id={`assign-driver-${d.id}`}
                         className="h-8 rounded-md border border-input bg-background px-2 text-xs"
                         value={assignDriverByDelivery[d.id] ?? ''}
                         onChange={(e) => setAssignDriverByDelivery((m) => ({ ...m, [d.id]: e.target.value }))}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -321,12 +321,17 @@ function DepositForm({
   const [depositStatus, setDepositStatus] = useState('PAID');
   const [depositAmount, setDepositAmount] = useState(initialAmount);
   const [depositNote, setDepositNote] = useState('');
+  // Phase 15 hardening: this Label was only visually adjacent to the
+  // select, not programmatically associated with it — a screen reader
+  // announced it as an unlabeled combobox. htmlFor/id wires them together.
+  const statusId = useId();
 
   return (
     <div className="flex flex-wrap items-end gap-2 border-t pt-3">
       <div className="space-y-1">
-        <Label className="text-xs">Status</Label>
+        <Label htmlFor={statusId} className="text-xs">Status</Label>
         <select
+          id={statusId}
           className="h-8 rounded-md border border-input bg-background px-2 text-xs"
           value={depositStatus}
           onChange={(e) => setDepositStatus(e.target.value)}

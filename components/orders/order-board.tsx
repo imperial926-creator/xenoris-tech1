@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -376,12 +376,17 @@ function PaymentForm({
   const [method, setMethod] = useState('CASH');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  // Phase 15 hardening: this Label was only visually adjacent to the
+  // select, not programmatically associated with it — a screen reader
+  // announced it as an unlabeled combobox. htmlFor/id wires them together.
+  const methodId = useId();
 
   return (
     <div className="flex flex-wrap items-end gap-2 border-t pt-3">
       <div className="space-y-1">
-        <Label className="text-xs">Method</Label>
+        <Label htmlFor={methodId} className="text-xs">Method</Label>
         <select
+          id={methodId}
           className="h-8 rounded-md border border-input bg-background px-2 text-xs"
           value={method}
           onChange={(e) => setMethod(e.target.value)}
