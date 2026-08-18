@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { ForbiddenError, UnauthenticatedError } from '@/lib/auth/rbac';
+import { log } from '@/lib/monitoring/logger';
+import { getErrorReporter } from '@/lib/monitoring/ErrorReporter';
 
 /**
  * Centralized mapping from thrown errors to HTTP responses, so every route
@@ -27,8 +29,11 @@ export function toErrorResponse(error: unknown): NextResponse {
     return NextResponse.json({ error: error.message }, { status: 409 });
   }
 
-  // Never leak internal error details to the client for unexpected errors.
-  console.error('Unhandled API error:', error);
+  // Never leak internal error details to the client for unexpected errors —
+  // full detail goes to the structured logger + error-tracking provider
+  // (§63 Observability) instead of the response body.
+  log.error('Unhandled API error', error);
+  getErrorReporter().captureException(error);
   return NextResponse.json({ error: 'Internal server error.' }, { status: 500 });
 }
 

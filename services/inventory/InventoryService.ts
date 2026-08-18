@@ -6,6 +6,7 @@ import { writeAuditLog } from '@/lib/audit/log';
 import { NotFoundError, ConflictError } from '@/lib/utils/api-error';
 import { convertQuantity, assertSingleLevelChain, type UnitLike } from '@/lib/inventory/units';
 import { AccountingService } from '@/services/accounting/AccountingService';
+import { log } from '@/lib/monitoring/logger';
 import type {
   CreateUnitInput,
   UpdateUnitInput,
@@ -983,9 +984,17 @@ export class InventoryService {
         let convertedQty: Prisma.Decimal;
         try {
           convertedQty = convertQuantity(recipeItem.unit as unknown as UnitLike, recipeItem.ingredient.stockUnit as unknown as UnitLike, requiredQty);
-        } catch {
+        } catch (error) {
           // Incompatible recipe-unit/stock-unit config — a data problem,
-          // not something a customer's order should ever fail over.
+          // not something a customer's order should ever fail over. Logged
+          // (§63 Observability) so an owner/admin can find and fix the
+          // misconfigured recipe/ingredient — silently skipping consumption
+          // for this ingredient would otherwise leave stock levels quietly
+          // wrong with no trace of why.
+          log.warn('InventoryService.consumeForOrder: skipping ingredient with incompatible recipe/stock unit', {
+            organizationId, branchId, orderId, ingredientId: recipeItem.ingredientId,
+            error: error instanceof Error ? error.message : String(error),
+          });
           continue;
         }
 

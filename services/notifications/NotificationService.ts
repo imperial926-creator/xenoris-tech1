@@ -6,6 +6,7 @@ import { NotFoundError } from '@/lib/utils/api-error';
 import { getEmailProvider } from '@/lib/notifications/EmailProvider';
 import { getSmsProvider } from '@/lib/notifications/SmsProvider';
 import type { ListNotificationsQueryInput } from '@/lib/validation/notification';
+import { log } from '@/lib/monitoring/logger';
 
 /**
  * Phase 14 — Notifications (master spec "PHASE 14 — NOTIFICATIONS" build
@@ -284,12 +285,16 @@ export class NotificationService {
         this.dispatchEmail(organizationId, branchId, type, relatedEntityType, relatedEntityId, recipient.guestEmail ?? null, subject, body),
         this.dispatchSms(organizationId, branchId, type, relatedEntityType, relatedEntityId, recipient.guestPhone ?? null, body),
       ]);
-    } catch {
+    } catch (error) {
       // Both dispatch helpers already catch everything internally and
       // always write a Notification row rather than throwing — this outer
       // catch is a last-resort safety net so a truly unexpected error
       // (e.g. the audit-log-style DB write itself failing) still can't
-      // propagate into the caller's already-committed business flow.
+      // propagate into the caller's already-committed business flow. Still
+      // logged (§63 Observability) since it means BOTH the row write and
+      // the dispatch attempt failed — the only case this class produces no
+      // queryable Notification row at all.
+      log.error('NotificationService.send: unexpected failure writing Notification row', error, { organizationId, branchId, type, relatedEntityType, relatedEntityId });
     }
   }
 
@@ -321,6 +326,10 @@ export class NotificationService {
         providerReference: result.providerReference,
       });
     } catch (error) {
+      // Recorded in the Notification row (queryable/auditable per this
+      // class's design principle 2) AND logged (§63 Observability) — a
+      // provider outage should show up in both places, not just the DB.
+      log.warn('Email dispatch failed', { organizationId, branchId, type, relatedEntityType, relatedEntityId, error: error instanceof Error ? error.message : String(error) });
       await this.record({
         organizationId, branchId, type, channel: 'EMAIL', status: 'FAILED',
         recipient: to, subject, body, relatedEntityType, relatedEntityId,
@@ -356,6 +365,7 @@ export class NotificationService {
         providerReference: result.providerReference,
       });
     } catch (error) {
+      log.warn('SMS dispatch failed', { organizationId, branchId, type, relatedEntityType, relatedEntityId, error: error instanceof Error ? error.message : String(error) });
       await this.record({
         organizationId, branchId, type, channel: 'SMS', status: 'FAILED',
         recipient: to, subject: null, body, relatedEntityType, relatedEntityId,
