@@ -38,12 +38,31 @@ const SECURITY_HEADERS = [
 
 const nextConfig = {
   reactStrictMode: true,
+  // Phase 16: removes the `X-Powered-By: Next.js` response header (master
+  // spec §63 observability / general hardening — don't advertise the
+  // framework to every client for free).
+  poweredByHeader: false,
+  // Phase 16: standalone output produces a minimal, self-contained
+  // `.next/standalone` server bundle (only the production deps it actually
+  // needs, no full `node_modules`) — see `Dockerfile`, which copies exactly
+  // that output. Documented in docs/deployment/README.md.
+  output: 'standalone',
   // Business-critical data must never be silently stale; individual routes opt into
   // caching deliberately rather than relying on aggressive defaults.
   experimental: {
     serverActions: {
       bodySizeLimit: '5mb',
     },
+    // Enables root-level instrumentation.ts's register() hook (see that
+    // file — it runs lib/config/env.ts's fail-fast startup validation).
+    // Flagged explicitly rather than assumed stable: this repo has never
+    // been through `npm install`/`next build` in this sandbox (no network
+    // access here, see CLAUDE.md → Known Issues), so whether this exact
+    // Next 14.2.5 pin still requires the flag (it was stabilized in a
+    // 14.x/15.x release) is unverified. Setting it is harmless either way
+    // — a no-op if already stable, required if not — so it stays on
+    // rather than silently risking instrumentation.ts never running.
+    instrumentationHook: true,
   },
   async headers() {
     return [
