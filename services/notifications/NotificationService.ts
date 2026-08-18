@@ -2,8 +2,10 @@ import 'server-only';
 import { Prisma } from '@prisma/client';
 import type { NotificationChannel, NotificationStatus, NotificationType } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
+import { NotFoundError } from '@/lib/utils/api-error';
 import { getEmailProvider } from '@/lib/notifications/EmailProvider';
 import { getSmsProvider } from '@/lib/notifications/SmsProvider';
+import type { ListNotificationsQueryInput } from '@/lib/validation/notification';
 
 /**
  * Phase 14 — Notifications (master spec "PHASE 14 — NOTIFICATIONS" build
@@ -83,6 +85,29 @@ function formatDateTime(date: Date): string {
 }
 
 export class NotificationService {
+  /**
+   * Notification delivery history — every attempted send, one row per
+   * channel per attempt (see class header point 2), newest first. Backs
+   * the Phase 14 dashboard/API so staff can confirm "did the confirmation
+   * actually go out" without touching the database directly.
+   */
+  static async list(organizationId: string, branchId: string, query: ListNotificationsQueryInput) {
+    await this.assertBranchInOrg(organizationId, branchId);
+    return prisma.notification.findMany({
+      where: {
+        organizationId,
+        branchId,
+        type: query.type,
+        channel: query.channel,
+        status: query.status,
+        relatedEntityType: query.relatedEntityType,
+        relatedEntityId: query.relatedEntityId,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: query.take,
+    });
+  }
+
   /** Master spec §40: "Reservation confirmation". Fired when a reservation transitions to CONFIRMED — see ReservationService.updateStatus. */
   static async sendReservationConfirmation(
     organizationId: string,
@@ -377,5 +402,10 @@ export class NotificationService {
       // service must never throw into a caller that has already committed
       // its real business transaction (see class header point 1).
     }
+  }
+
+  private static async assertBranchInOrg(organizationId: string, branchId: string): Promise<void> {
+    const branch = await prisma.branch.findFirst({ where: { id: branchId, organizationId } });
+    if (!branch) throw new NotFoundError('Branch');
   }
 }

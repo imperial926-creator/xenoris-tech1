@@ -40,6 +40,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: '/dashboard/reports', label: 'Exports', phase: 'unscheduled' },
   { href: '/dashboard/analytics', label: 'Analytics', phase: null },
   { href: '/dashboard/ai-insights', label: 'AI Insights', phase: null },
+  { href: '/dashboard/notifications', label: 'Notifications', phase: null },
   { href: '/dashboard/settings', label: 'Settings', phase: null },
 ];
 

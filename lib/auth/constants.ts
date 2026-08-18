@@ -45,6 +45,7 @@ export const PERMISSIONS = {
   REPORTS_VIEW: 'reports:view',
   ANALYTICS_VIEW: 'analytics:view',
   AUDIT_VIEW: 'audit:view',
+  NOTIFICATION_VIEW: 'notification:view',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -74,6 +75,7 @@ export const PERMISSION_CATALOG: Array<{ key: PermissionKey; description: string
   { key: PERMISSIONS.REPORTS_VIEW, description: 'Export reports (Phase 11+)' },
   { key: PERMISSIONS.ANALYTICS_VIEW, description: 'View owner analytics dashboards (Phase 12)' },
   { key: PERMISSIONS.AUDIT_VIEW, description: 'View audit logs' },
+  { key: PERMISSIONS.NOTIFICATION_VIEW, description: 'View notification delivery history (Phase 14)' },
 ];
 
 /**
@@ -128,6 +130,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleNameLiteral, PermissionKey[]> 
     PERMISSIONS.INVENTORY_MANAGE,
     PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.ANALYTICS_VIEW,
+    // Managers are the ones who follow up when a guest says "I never got
+    // my confirmation" — same operational-visibility reasoning as
+    // ANALYTICS_VIEW above, scoped one level narrower than AUDIT_VIEW
+    // (OWNER/ADMINISTRATOR only), since this is a communications log, not
+    // a full change-history audit trail.
+    PERMISSIONS.NOTIFICATION_VIEW,
   ],
   ACCOUNTANT: [
     PERMISSIONS.FINANCE_VIEW,
