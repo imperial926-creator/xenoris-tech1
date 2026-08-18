@@ -65,6 +65,7 @@ model Organization {
   expenseCategories     ExpenseCategory[]
   vendors               Vendor[]
   expenses              Expense[]
+  notifications         Notification[]
 
   // Phase 8 — CRM. Per-organization overrides for the RFM segmentation
   // thresholds in lib/crm/rfm.ts (recency/frequency/monetary cutoffs).
@@ -132,6 +133,7 @@ model Branch {
   journalEntries        JournalEntry[]
   financialTransactions FinancialTransaction[]
   expenses              Expense[]
+  notifications         Notification[]
 
   @@index([organizationId])
   @@map("branches")
@@ -2481,4 +2483,97 @@ model ExpenseAttachment {
 
   @@index([expenseId])
   @@map("expense_attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — Notifications
+// ---------------------------------------------------------------------------
+
+// Master spec §40's own list, verbatim. Reminder-type entries
+// (RESERVATION_REMINDER/DEPOSIT_REMINDER/CATERING_REMINDER/PAYMENT_REMINDER)
+// are fully implemented as callable NotificationService methods but are not
+// wired to any automatic trigger in this build — see NotificationService's
+// class header for why (no scheduler/cron infrastructure exists in this
+// codebase; a real deployment would call these from a scheduled job).
+enum NotificationType {
+  RESERVATION_CONFIRMATION
+  RESERVATION_REMINDER
+  DEPOSIT_REMINDER
+  ORDER_CONFIRMATION
+  ORDER_STATUS
+  DELIVERY_UPDATE
+  CATERING_QUOTATION
+  CATERING_REMINDER
+  PAYMENT_REMINDER
+  INVOICE
+  REVIEW_REQUEST
+}
+
+// Master spec §40: "Support: Email, Push notifications, SMS if configured."
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+}
+
+enum NotificationStatus {
+  // Provider accepted the send request.
+  SENT
+  // Provider was configured but the send attempt itself failed —
+  // errorMessage carries the provider's error.
+  FAILED
+  // No provider is configured for this channel (lib/notifications/*Provider.ts
+  // — matches the "Integration requires configuration" convention every
+  // other unconfigured integration in this build follows).
+  SKIPPED_NOT_CONFIGURED
+  // A provider is configured, but the triggering record had no usable
+  // recipient for this channel (e.g. no email on file for an EMAIL attempt).
+  SKIPPED_NO_RECIPIENT
+}
+
+// One row per attempted send, one channel per row — a reservation
+// confirmation that goes out over both email and SMS produces two rows, not
+// one row with two statuses, so each channel's own delivery outcome is
+// independently queryable/auditable. Every row is written regardless of
+// outcome (including the two SKIPPED_* cases) — a silently-absent row would
+// be indistinguishable from "NotificationService was never called at all",
+// which defeats the point of having a notification history at all.
+model Notification {
+  id             String              @id @default(cuid())
+  organizationId String
+  branchId       String
+  type           NotificationType
+  channel        NotificationChannel
+  status         NotificationStatus
+
+  // Email address or phone number actually targeted; null for the
+  // SKIPPED_NO_RECIPIENT case, where there was nothing to target.
+  recipient String?
+  // Email only; null for SMS/PUSH.
+  subject   String?
+  body      String
+
+  // Loosely-typed link back to whatever triggered this notification
+  // (e.g. "Reservation/<id>", "Order/<id>") — deliberately not a set of
+  // nullable FK columns (one per possible entity type), the same
+  // AuditLog.entityType/entityId pattern this codebase already established
+  // in Phase 1 for exactly this "polymorphic reference" shape.
+  relatedEntityType String?
+  relatedEntityId   String?
+
+  // Opaque provider-assigned id, set only on SENT — mirrors
+  // PaymentIntentResult.providerReference's naming in lib/payments/PaymentProvider.ts.
+  providerReference String?
+  errorMessage      String?
+
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, type])
+  @@index([organizationId, createdAt])
+  @@index([relatedEntityType, relatedEntityId])
+  @@map("notifications")
 }
