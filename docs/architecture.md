@@ -1149,3 +1149,141 @@ status-filterable delivery-history board following `invoice-board.tsx`'s establi
 Scope boundary, stated plainly: this phase adds exactly one new table (`Notification`) and three
 new enums, and touches 7 existing service methods to call it — no changes to any existing table's
 schema. See `docs/database.md`.
+
+## 23. Phase 15 — Hardening
+
+The master spec's "PHASE 15 — HARDENING" line item (Security/Performance/Accessibility/Database/
+Financial integrity/API review) plus §41/§42/§64/§65/§66/§67/§68's substantive checklists. Unlike
+every prior phase, this one adds no new tables, services, or UI surfaces — it audits the ~15 phases
+already built and fixes what the audit found.
+
+**Method.** Six parallel, read-only research passes (one per review area — security, performance,
+accessibility, database, financial integrity, API) each read the full relevant slice of the
+codebase and reported ranked findings without editing anything. Findings were then triaged into
+fix-now vs. flag-and-defer using severity, blast radius, and this codebase's established discipline
+of flagging a real gap explicitly (the same pattern already used for `UnconfiguredPaymentProvider`/
+`UnconfiguredAIProvider`/etc.) rather than silently declaring it done. Every fix below was verified
+with a `tsc --noEmit` diagnostic diff against the Phase 14 baseline (~3336 diagnostics) — new
+diagnostics were accepted only when they fell into this sandbox's established "no `node_modules`"
+artifact categories (TS2307/TS7006/TS7026/TS7031/TS2591/TS2882/TS2503/TS7053; see `CLAUDE.md` →
+Known Issues), never a new category. The database changes were additionally smoke-tested against a
+real, disposable Postgres 16 database in this sandbox (all 15 migrations applied end-to-end from
+scratch; the new constraints were exercised directly — see below).
+
+**Security.** `lib/security/rate-limit.ts` — a fixed-window, in-memory rate limiter wired into
+`middleware.ts` ahead of every `/api/*` request (120 req/min general, 10 req/min on
+`/api/auth/{login,register}`), returning 429 with `Retry-After` when exceeded. Explicitly flagged as
+a known limitation: process-local only, not correct across horizontally-scaled instances — the
+upgrade path (a shared store, e.g. Upstash Redis) sits behind the same `checkRateLimit()` signature
+so swapping the backing store later doesn't touch any call site. Secure response headers
+(`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, HSTS, CSP) are
+set via `next.config.js`'s `headers()` rather than `middleware.ts`, so they apply to every response
+including static assets. The CSP still allows `'unsafe-inline'` for script/style — flagged, not
+closed: a real fix needs nonce-based CSP, a build-tooling change out of scope for this pass.
+Defense-in-depth tenant scoping was tightened in two spots that were not exploitable today but broke
+this codebase's own "every query scopes by organizationId/branchId itself, never relies solely on an
+upstream check" convention: `ReservationService.assertWithinBusinessHours` and
+`OrderService.seatTable` now both take and filter by `organizationId`/`branchId` directly.
+`addExpenseAttachmentSchema.fileUrl` (metadata-only today — no real upload integration exists yet)
+now requires an `https://` URL, closing a stored-XSS-shaped hole before a future storage integration
+could inherit it.
+
+**Performance.** `lib/validation/pagination.ts` exports a shared `paginationQuerySchema`
+(`take`/`skip`, capped at 200) merged into every list-query schema that was previously unbounded —
+11 endpoints across orders, reservations, customers, deliveries, catering
+(inquiries/quotes/events), inventory (purchase orders/stock counts), journal entries, and expenses —
+so no branch can return its entire history to the browser in one response, per the master spec §64's
+own "never load the entire order/customer history into the browser unnecessarily." Three missing
+indexes were added: `notifications` now indexes `(organizationId, branchId, createdAt)` in place of
+the redundant `(organizationId, createdAt)` one (every real query filters both columns together);
+`orders` gains `(branchId, status, createdAt)` alongside its existing `(branchId, createdAt)` for
+status-filtered board views; `journal_entries` gains `(organizationId, entryDate)`, which no prior
+index covered despite every list query sorting/range-filtering on it.
+`DeliveryService.myDeliveries` was investigated and found already bounded (`take: 100`) — a
+false-positive in the initial audit, left unchanged.
+
+**Accessibility.** A global `focus-visible` rule in `globals.css` (covering `select`/`input`/
+`textarea`/`button`) was the single highest-leverage fix — ~54 raw `<select>` elements across the
+dashboard board components had no visible keyboard focus indicator at all, and this one rule closes
+that gap for all of them without touching 50+ call sites. Two new primitives:
+`components/ui/select.tsx` (a native-select wrapper where `label` is a *required* prop wired to the
+control via `htmlFor`/`useId` — it is not possible to construct one unlabeled) and
+`components/ui/form-error.tsx` (`role="alert"` so a screen reader announces a validation error the
+moment it appears, replacing the codebase's `{error && <p>...}` pattern that recurs ~28 times).
+The three concretely-audited unlabeled-select spots were fixed directly: `order-board.tsx` and
+`reservation-board.tsx` had a `Label` only visually adjacent to their selects (no `htmlFor`/`id`
+link); `delivery-board.tsx`'s driver-assignment dropdown had no label at all. The broader
+~54-select/~28-error-message retrofit onto the new primitives is intentionally out of scope for this
+pass — flagged for apply-at-next-touch rather than a wholesale rewrite.
+
+**Database.** Branch's `onDelete` on 8 financial/audit-trail child tables (`invoices`,
+`catering_payments`, `inventory_transactions`, `purchase_orders`, `waste_records`,
+`journal_entries`, `financial_transactions`, `expenses`) changes from `CASCADE` to `RESTRICT` —
+deleting a branch must never silently delete or orphan a ledger row; a branch with financial history
+has to be deactivated (`BranchStatus`), not deleted. `JournalEntry.reversalOfEntryId` gets the same
+treatment (`SET NULL` -> `RESTRICT`), so deleting an original entry can no longer silently detach its
+reversal. Five `CHECK` constraints back up existing Zod validation at the database level:
+`restaurant_tables.capacity > 0`, `order_items.quantity > 0`, `invoice_items.quantity > 0`,
+`catering_packages` min/max guest bounds, `expenses.amount > 0`. Seven `@@unique([...,'name'])`
+constraints (`TableSection`, `MenuCategory`, `DeliveryZone`, `CateringPackage`, `Supplier`,
+`ExpenseCategory`, `Vendor`) convert to partial unique indexes (`WHERE active`), so a name can be
+reused after the original row is deactivated — the same pattern already established by
+`invoices_one_active_per_order`. `MenuModifierGroup` was flagged by the initial audit for the same
+treatment but turned out to have no `active` column at all (no soft-delete concept for that model),
+so its plain unique constraint is correct as-is; noted here since the audit's original finding
+included it in error. All of the above was smoke-tested end-to-end against a real Postgres 16
+database in this sandbox: a branch with expense history correctly fails to delete
+(`expenses_branchId_fkey`), a zero-amount expense correctly fails to insert
+(`expenses_amount_check`), and deactivating a vendor then reusing its name correctly succeeds while
+two simultaneously-active vendors with the same name still correctly conflict. Row-level security
+for multi-tenant isolation (flagged as a Phase 15 revisit item back in § 7. Risks) remains
+unimplemented — this pass's tenant-isolation work was the defense-in-depth query-scoping fixes noted
+under Security above, not RLS; RLS itself stays a flagged, deferred item, not silently declared done.
+
+**Financial integrity.** Four check-then-act races converted to atomic guarded updates
+(`updateMany` with the pre-transaction status in the `WHERE` clause, the affected-row count checked,
+a `ConflictError` thrown on a lost race) so two concurrent requests can never both "win" and
+double-apply a side effect: `OrderService.updateStatus` (was at risk of running the
+COMPLETED-only inventory-consumption/revenue-posting side effects twice),
+`ReservationService.recordDeposit` (double-posting a deposit to the ledger),
+`AccountingService.postJournalEntry`, and `AccountingService.approveExpense` — the last one
+restructured to claim the expense via the guarded update *before* creating its journal entry, so a
+losing request never creates a duplicate posting in the first place; if anything after the claim
+throws, the whole transaction (claim included) rolls back together.
+`OrderService.computeOrderTotals` now rejects a `discountAmount` greater than the subtotal
+(previously produced a silent negative `order.total` that underposted revenue at completion time).
+`recordOrderPaymentSchema.amount` and `recordCateringPaymentSchema.amount` now require a positive
+amount, not merely a non-negative one. Two items the audit raised and investigation confirmed as
+already-correct, left unchanged: the two self-flagged N+1 read patterns already commented in
+`AccountingService.generateTrialBalance` and `CustomerService.segmentBreakdown` (both are
+read-path-only, bounded by realistic chart-of-accounts/customer-event sizes, and already documented
+in place — not re-litigated here); and the `User.deletedAt` + `status` vs. every other soft-deletable
+model's `active`-only convention, which is an intentional inconsistency (users need a distinct
+"deactivated for login purposes" signal separate from `active`), not a bug.
+
+**API.** `auth/logout` gets the try/catch + `toErrorResponse` convention every other route in the
+129-route tree already has. `POST .../inventory/transfers` wraps its result under `{transfer}`
+instead of returning it bare (no dashboard UI consumes this route yet, so a clean fix, not a
+breaking one). The three customer sub-resource `DELETE` routes (addresses/tags/preferences) now name
+their response key after the deleted resource instead of the generic `{result}`, matching
+`DELETE /branches/[id]` -> `{branch}` — verified no UI consumer reads these bodies before renaming.
+The two payment-creation `POST` routes (order payments, catering event payments) now return 201 and
+additively include the created `{payment}` alongside the existing parent-resource key — kept
+additive, not a replacement, because `OrderService.recordPayment`/`CateringService.recordPayment`'s
+return contracts (the full parent resource) are relied on directly by several integration tests.
+`organizations/[id]` replaces its bespoke `throw new Error('FORBIDDEN_TENANT_MISMATCH')` +
+manual-404 pattern with `NotFoundError`, routing through the same `toErrorResponse` mapping every
+other route uses (identical status/behavior, less bespoke code). Two items the audit raised and
+confirmed as intentional, left unchanged: Zod validation failures return 422 (not 400) consistently
+across the whole route tree, and `DELETE` method coverage is deliberately asymmetric (present only
+on resources with a real deactivation/removal concept) — both are established, consistent
+conventions, not oversights.
+
+Scope boundary, stated plainly: this phase touches no new tables (only index/constraint changes to
+existing ones — see `docs/database.md`) and adds no new services or dashboard pages; every change is
+a fix to code from Phases 1–14 or a new small shared primitive (`lib/security/rate-limit.ts`,
+`lib/validation/pagination.ts`, `components/ui/{select,form-error}.tsx`) used by those fixes. Every
+"flagged, not fixed" item named above is a deliberate scope boundary, not an oversight — each is
+either already scheduled for a distinct future phase (RLS, a real payment/storage provider),
+requires a decision this build cannot make unilaterally (nonce-based CSP's build-tooling change,
+a distributed rate-limit store choice), or was investigated and confirmed correct as-is.

@@ -1098,7 +1098,71 @@ response. Financial and inventory calculations are never trusted from the client
   (type/status filtering, branch scoping, cross-org rejection). `tests/helpers/db.ts`'s shared
   `resetDatabase()` gained a `notification.deleteMany()`.
 
-**Not yet built** (Phases 15–16 per `docs/architecture.md`): hardening, deployment.
+**Phase 15 — Hardening: done.**
+
+- Master spec's "PHASE 15 — HARDENING" build list (Security/Performance/Accessibility/Database/
+  Financial integrity/API review) plus §41/§42/§64/§65/§66/§67/§68's substantive checklists. No new
+  tables, services, or dashboard pages — this phase audits Phases 1–14 and fixes what the audit
+  found. Full narrative, including what was investigated and deliberately left unchanged, in
+  `docs/architecture.md` § 23; schema-level detail in `docs/database.md`.
+- **Method**: six parallel read-only audit passes (security/performance/accessibility/database/
+  financial-integrity/API), each covering its full relevant slice of the codebase, triaged into
+  fix-now vs. flag-and-defer. Every fix verified via a `tsc --noEmit` diagnostic diff against the
+  Phase 14 baseline (new diagnostics accepted only inside this sandbox's established artifact
+  categories — see Known Issues below — never a new category). The database changes were
+  additionally smoke-tested against a real, disposable Postgres 16 database in this sandbox: all 15
+  migrations applied end-to-end from scratch, then the new `RESTRICT`/`CHECK`/partial-unique-index
+  behavior was exercised directly (a branch with expense history correctly fails to delete; a
+  zero-amount expense correctly fails to insert; deactivating a vendor and reusing its name
+  correctly succeeds while two simultaneously-active same-name vendors still correctly conflict).
+- **Security**: `lib/security/rate-limit.ts`, a fixed-window in-memory limiter wired into
+  `middleware.ts` (120 req/min general, 10 req/min on auth login/register), 429 + `Retry-After` when
+  exceeded — flagged as process-local only, not correct across horizontally-scaled instances, with
+  the upgrade path (a shared store) sitting behind the same function signature. Secure response
+  headers (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`,
+  HSTS, CSP) via `next.config.js`'s `headers()` so they apply to every response including static
+  assets — CSP still allows `'unsafe-inline'` for script/style, flagged as a real gap needing a
+  build-tooling change (nonce-based CSP) out of scope here. Defense-in-depth tenant-scoping fixes to
+  `ReservationService.assertWithinBusinessHours` and `OrderService.seatTable` (not exploitable
+  today, but broke this codebase's own "every query scopes itself" convention).
+- **Performance**: `lib/validation/pagination.ts`'s shared `paginationQuerySchema` applied to 11
+  previously-unbounded list endpoints (orders, reservations, customers, deliveries, catering
+  inquiries/quotes/events, inventory purchase-orders/stock-counts, journal entries, expenses); three
+  missing/redundant indexes fixed (`notifications`, `orders`, `journal_entries` — see
+  `docs/database.md` § Phase 15 Schema).
+- **Accessibility**: a global `focus-visible` CSS rule (the single highest-leverage fix — covers
+  ~54 previously-unfocusable raw `<select>` elements in one rule); `components/ui/select.tsx`
+  (label is a required, `htmlFor`-wired prop — impossible to construct unlabeled) and
+  `components/ui/form-error.tsx` (`role="alert"`) as new shared primitives; the three concretely
+  unlabeled-select spots (`order-board.tsx`, `reservation-board.tsx`, `delivery-board.tsx`) fixed
+  directly. Broader retrofit onto the new primitives flagged for apply-at-next-touch.
+- **Database**: Branch's `onDelete` on 8 financial/audit-trail tables `CASCADE` -> `RESTRICT`
+  (a branch with financial history can't be hard-deleted, only deactivated);
+  `JournalEntry.reversalOfEntryId` `SET NULL` -> `RESTRICT`; five `CHECK` constraints backing up
+  existing Zod validation; seven `@@unique([...,'name'])` constraints converted to partial unique
+  indexes (`WHERE active`) so a name can be reused after deactivation — `MenuModifierGroup` was
+  audited for the same fix but has no `active` column, so it was correctly left alone.
+- **Financial integrity**: four check-then-act races converted to atomic guarded updates
+  (`OrderService.updateStatus`, `ReservationService.recordDeposit`,
+  `AccountingService.postJournalEntry`, `AccountingService.approveExpense`) so two concurrent
+  requests can never both win and double-apply a ledger side effect. `discountAmount` now rejected
+  if it exceeds the order subtotal; order/catering payment amounts now required to be positive, not
+  merely non-negative.
+- **API**: `auth/logout` gets the standard try/catch + `toErrorResponse` convention; the inventory
+  transfers route and three customer sub-resource `DELETE` routes now name their response key after
+  the actual resource instead of a generic `{result}`; the two payment-creation routes now return
+  201 and additively include the created `{payment}`; `organizations/[id]` routes its tenant-mismatch
+  check through `NotFoundError`/`toErrorResponse` instead of a bespoke thrown-string + manual 404.
+- Deliberately left unchanged after investigation: the two self-flagged N+1 read patterns already
+  commented in `AccountingService.generateTrialBalance`/`CustomerService.segmentBreakdown`;
+  `User.deletedAt` + `status` vs. every other model's `active`-only convention (an intentional
+  distinction, not an inconsistency); Zod validation returning 422 (not 400) and asymmetric `DELETE`
+  coverage across the route tree (both confirmed as consistent existing conventions, not oversights);
+  Postgres row-level security for multi-tenant isolation (flagged back in `docs/architecture.md` §
+  7. Risks as a Phase 15 revisit item — this pass's tenant-isolation work was the defense-in-depth
+  query-scoping fixes above, not RLS; RLS itself remains a flagged, deferred item).
+
+**Not yet built** (Phase 16 per `docs/architecture.md`): deployment.
 
 ## Known Issues / Environment Constraints
 

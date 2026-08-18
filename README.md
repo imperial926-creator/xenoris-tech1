@@ -35,8 +35,14 @@ database write access, with every insight naming the real data it came from), an
 (notifications: Email/SMS/Push provider abstractions — none configured yet — and a
 `NotificationService` covering every master-spec notification type, wired into reservation, order,
 delivery, catering, and invoice status changes as a best-effort side effect that never blocks the
-underlying transaction) are implemented. Everything else (hardening, deployment) is not built
-yet — see `docs/architecture.md` for the phase order.
+underlying transaction), and Phase 15 (hardening: a six-area audit — security, performance,
+accessibility, database, financial integrity, API — across every prior phase, fixing rate
+limiting, secure headers, pagination on 11 previously-unbounded list endpoints, missing DB
+indexes, keyboard focus/labeling gaps, Branch delete-cascade → restrict on financial tables, new
+CHECK constraints, four concurrency races converted to atomic guarded updates, and a set of API
+response-shape inconsistencies — see `docs/architecture.md` § 23 for the full audit-to-fix
+narrative, including what was deliberately left unchanged) are implemented. Everything else
+(deployment) is not built yet — see `docs/architecture.md` for the phase order.
 
 > **This code has not been runtime-verified.** It was authored in a sandbox with no network
 > access to npm/pip, so `npm install` was never run here and nothing has been started, built, or

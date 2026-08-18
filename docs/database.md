@@ -692,6 +692,54 @@ createdAt, sentAt (DateTime?)`.
 other branch-scoped table carries both FKs: every notification is scoped to one branch (where the
 business event happened) within one organization (the tenant boundary).
 
+## Phase 15 Schema
+
+No new tables or columns — Phase 15 (Hardening) only changes indexes and constraints on existing
+tables, across two migrations: `20260818030000_phase15_performance_indexes` and
+`20260818040000_phase15_db_financial_hardening`. See `docs/architecture.md` § 23 for the full
+audit-to-fix narrative; this section documents only the resulting schema shape.
+
+### Indexes added/replaced
+
+- `notifications`: `(organizationId, branchId, createdAt)` replaces the old
+  `(organizationId, createdAt)` — every real query (`NotificationService.list`) filters both columns
+  together, never `organizationId` alone.
+- `orders`: `(branchId, status, createdAt)` added alongside the existing `(branchId, createdAt)` —
+  the old index still serves the unfiltered board view, the new one serves status-filtered views.
+- `journal_entries`: `(organizationId, entryDate)` added — no prior index covered `entryDate` despite
+  every list query sorting/range-filtering on it.
+
+### Foreign keys: CASCADE -> RESTRICT
+
+Branch's `onDelete` on 8 financial/audit-trail child tables — `invoices`, `catering_payments`,
+`inventory_transactions`, `purchase_orders`, `waste_records`, `journal_entries`,
+`financial_transactions`, `expenses` — changes from `CASCADE` to `RESTRICT`. A branch with financial
+history can no longer be hard-deleted (only deactivated via `BranchStatus`), so its ledger rows can
+never be silently destroyed by a cascading delete. `journal_entries.reversalOfEntryId` changes from
+`SET NULL` to `RESTRICT` for the same reason — an original entry can't be deleted out from under its
+reversal.
+
+### CHECK constraints added
+
+`restaurant_tables_capacity_check` (`capacity > 0`), `order_items_quantity_check` (`quantity > 0`),
+`invoice_items_quantity_check` (`quantity > 0`), `catering_packages_guest_bounds_check` (`minGuests`/
+`maxGuests` each positive-or-null, and `maxGuests >= minGuests` when both are set),
+`expenses_amount_check` (`amount > 0`). These back up existing Zod validation at the database level —
+same "the DB constraint is the real guarantee, the Zod check is the friendly-error-message layer in
+front of it" reasoning as the pre-existing `journal_entry_lines_debit_xor_credit_check`.
+
+### Unique constraints converted to partial unique indexes (`WHERE active`)
+
+`TableSection`, `MenuCategory`, `DeliveryZone`, `CateringPackage`, `Supplier`, `ExpenseCategory`, and
+`Vendor` each had a plain `@@unique([...,'name'])` that permanently blocked reusing a name after the
+row was deactivated (`active = false`). Each converts to a partial unique index scoped `WHERE
+active`, the same pattern Phase 4's `invoices_one_active_per_order` already established — like that
+index, these have no representation in Prisma's schema DSL (partial/filtered unique indexes aren't
+expressible there) and are hand-written directly into the migration SQL; `schema.prisma` carries a
+comment at each model pointing to the migration. `MenuModifierGroup` was audited for the same
+treatment but has no `active` column at all — no soft-delete concept exists for that model — so its
+plain unique constraint is correct as-is and was left alone.
+
 ## Forward-Looking Schema (not created yet)
 
 The following table groups are specified in the master build prompt and will be added in their
