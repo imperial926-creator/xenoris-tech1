@@ -11,10 +11,14 @@ export async function DELETE(
 ) {
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
-    const result = await CustomerService.removeTag(
+    // Phase 15 hardening: was {result} — see the sibling addresses/[id]
+    // route's comment for the full rationale (matches the DELETE
+    // /branches/[id] -> {branch} convention; no UI consumer reads this
+    // response body).
+    const tag = await CustomerService.removeTag(
       session.organizationId, params.customerId, decodeURIComponent(params.tag), session.userId,
     );
-    return NextResponse.json({ result });
+    return NextResponse.json({ tag });
   } catch (error) {
     return toErrorResponse(error);
   }

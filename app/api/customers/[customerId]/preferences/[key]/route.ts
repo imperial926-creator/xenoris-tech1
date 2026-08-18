@@ -11,10 +11,12 @@ export async function DELETE(
 ) {
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
-    const result = await CustomerService.removePreference(
+    // Phase 15 hardening: was {result} — see the sibling addresses/[id]
+    // route's comment for the full rationale.
+    const preference = await CustomerService.removePreference(
       session.organizationId, params.customerId, decodeURIComponent(params.key), session.userId,
     );
-    return NextResponse.json({ result });
+    return NextResponse.json({ preference });
   } catch (error) {
     return toErrorResponse(error);
   }

@@ -21,7 +21,15 @@ export async function POST(
       input,
       session.userId,
     );
-    return NextResponse.json({ order });
+    // Phase 15 hardening: a payment-creation endpoint returning only the
+    // parent order at 200 (not the created payment at 201) doesn't match
+    // REST convention for a resource-creating POST. Kept additive rather
+    // than replacing {order} — OrderService.recordPayment's return
+    // contract (the full order) is relied on directly by several
+    // integration tests and by invoice-service.test.ts, so this only adds
+    // {payment} and bumps the status, without removing {order}.
+    const payment = order.payments.reduce((latest, p) => (p.createdAt > latest.createdAt ? p : latest));
+    return NextResponse.json({ order, payment }, { status: 201 });
   } catch (error) {
     return toErrorResponse(error);
   }

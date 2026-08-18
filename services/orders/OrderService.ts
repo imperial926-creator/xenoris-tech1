@@ -296,14 +296,26 @@ export class OrderService {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const updated = await tx.order.update({
-        where: { id: orderId },
+      // Phase 15 hardening: guards against two concurrent "advance this
+      // order's status" requests both reading the pre-transaction status
+      // above and both entering this transaction — without the status in
+      // the WHERE clause, the second one to commit would silently
+      // overwrite the first's transition (and, worse, re-run the
+      // COMPLETED-only inventory-consumption/revenue-posting side effects
+      // below a second time). updateMany (not update) because {id, status}
+      // isn't a unique-constraint shape Prisma's update() accepts; count
+      // === 0 means another request already changed the status first.
+      const updateResult = await tx.order.updateMany({
+        where: { id: orderId, status: order.status },
         data: {
           status: input.status,
           cancellationReason: input.status === 'CANCELLED' ? input.cancellationReason : order.cancellationReason,
           cancelledAt: input.status === 'CANCELLED' ? new Date() : order.cancelledAt,
         },
       });
+      if (updateResult.count === 0) {
+        throw new ConflictError('Order status changed concurrently — reload and try again.');
+      }
 
       await tx.orderStatusHistory.create({
         data: {
@@ -372,7 +384,7 @@ export class OrderService {
         newValue: { status: input.status, note: input.note, cancellationReason: input.cancellationReason },
       });
 
-      return tx.order.findUniqueOrThrow({ where: { id: updated.id }, include: ORDER_INCLUDE });
+      return tx.order.findUniqueOrThrow({ where: { id: orderId }, include: ORDER_INCLUDE });
     });
 
     // Phase 14 — Notifications. Fired after the transaction above has
@@ -537,6 +549,15 @@ export class OrderService {
       .reduce((sum, i) => sum.plus(i.lineTotal), new Prisma.Decimal(0));
     const taxTotal = taxableBase.times(PROVISIONAL_VAT_RATE);
     const discountTotal = new Prisma.Decimal(discountAmountInput);
+    // Phase 15 hardening: discountAmountSchema only enforced non-negative,
+    // so an oversized discount (e.g. a fat-fingered ₱10,000 off a ₱500
+    // order) previously produced a negative order.total, which then
+    // silently skipped/underposted revenue in AccountingService.
+    // recordOrderRevenue instead of surfacing a clear error at order-create
+    // time.
+    if (discountTotal.greaterThan(subtotal)) {
+      throw new ConflictError('discountAmount cannot exceed the order subtotal.');
+    }
     // Delivery fee is not part of the taxable food subtotal — it's added
     // straight into the total the customer owes (see schema.prisma's
     // Phase 6 comment for why it's snapshotted here at all).

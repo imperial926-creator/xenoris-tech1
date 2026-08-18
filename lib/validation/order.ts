@@ -11,6 +11,12 @@ const moneyString = z
   .transform((v) => String(v))
   .refine((v) => /^\d+(\.\d{1,2})?$/.test(v), 'Must be a valid monetary value.');
 
+// Phase 15 hardening: recordOrderPaymentSchema.amount used the bare
+// moneyString above, which accepts "0" — a $0 payment record is
+// meaningless (it doesn't move the order's amountPaid at all) and was
+// silently accepted instead of rejected as a likely input mistake.
+const positiveMoneyString = moneyString.refine((v) => Number(v) > 0, 'Must be a positive monetary value.');
+
 export const orderItemInputSchema = z.object({
   menuItemId: z.string().trim().min(1),
   menuItemVariantId: z.string().trim().min(1).optional(),
@@ -63,7 +69,7 @@ export type UpdateOrderStatusInput = z.infer<typeof updateOrderStatusSchema>;
 
 export const recordOrderPaymentSchema = z.object({
   method: z.enum(ORDER_PAYMENT_METHODS),
-  amount: moneyString,
+  amount: positiveMoneyString,
   status: z.enum(ORDER_PAYMENT_STATUSES).default('COMPLETED'),
   note: z.string().trim().max(500).optional(),
 });

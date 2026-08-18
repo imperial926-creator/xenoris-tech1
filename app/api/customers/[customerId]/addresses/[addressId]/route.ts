@@ -29,10 +29,15 @@ export async function DELETE(
 ) {
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
-    const result = await CustomerService.deleteAddress(
+    // Phase 15 hardening: was {result}, unlike every other DELETE route in
+    // this tree, which names the key after the deleted resource (e.g.
+    // DELETE /branches/[id] returns {branch}). The customer-board UI
+    // doesn't read this response body at all (it just re-fetches the
+    // profile), so this is a clean rename, not a breaking one.
+    const address = await CustomerService.deleteAddress(
       session.organizationId, params.customerId, params.addressId, session.userId,
     );
-    return NextResponse.json({ result });
+    return NextResponse.json({ address });
   } catch (error) {
     return toErrorResponse(error);
   }

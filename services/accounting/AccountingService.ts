@@ -337,11 +337,22 @@ export class AccountingService {
       if (period.status === 'CLOSED') {
         throw new ConflictError(`Cannot post — the accounting period covering this entry's date has since been closed.`);
       }
-      const posted = await tx.journalEntry.update({
-        where: { id: entryId },
+      // Phase 15 hardening: guards against two concurrent "post this
+      // entry" requests both reading DRAFT above and both entering this
+      // transaction — without status in the WHERE clause, both could
+      // "successfully" post the same entry, and a caller relying on
+      // postedAt/postedByUserId as an audit trail would see whichever
+      // request happened to write last. updateMany (not update) because
+      // {id, status} isn't a unique-constraint shape Prisma's update()
+      // accepts.
+      const updateResult = await tx.journalEntry.updateMany({
+        where: { id: entryId, status: 'DRAFT' },
         data: { status: 'POSTED', postedAt: new Date(), postedByUserId: actorUserId },
-        include: JOURNAL_ENTRY_INCLUDE,
       });
+      if (updateResult.count === 0) {
+        throw new ConflictError('Journal entry status changed concurrently — reload and try again.');
+      }
+      const posted = await tx.journalEntry.findUniqueOrThrow({ where: { id: entryId }, include: JOURNAL_ENTRY_INCLUDE });
       await writeAuditLog(tx, {
         organizationId, branchId: entry.branchId ?? undefined, userId: actorUserId,
         action: 'journal_entry.post', entityType: 'JournalEntry', entityId: entry.id,
@@ -665,6 +676,22 @@ export class AccountingService {
     }
 
     return prisma.$transaction(async (tx) => {
+      // Phase 15 hardening: claim the expense (guarded on approvalStatus)
+      // BEFORE creating the journal entry below — otherwise two concurrent
+      // "approve this expense" requests could both pass the pre-
+      // transaction PENDING check above, both call postAutomaticEntry, and
+      // double-post the same expense to the ledger. updateMany (not
+      // update) because {id, approvalStatus} isn't a unique-constraint
+      // shape Prisma's update() accepts. If this whole transaction later
+      // fails (e.g. postAutomaticEntry throws), the claim rolls back too.
+      const claimResult = await tx.expense.updateMany({
+        where: { id: expenseId, approvalStatus: 'PENDING' },
+        data: { approvalStatus: 'APPROVED', approvedByUserId: actorUserId },
+      });
+      if (claimResult.count === 0) {
+        throw new ConflictError('Expense approval status changed concurrently — reload and try again.');
+      }
+
       const cashAccount = await this.getSystemAccount(tx, organizationId, expense.paymentMethod === 'CASH' ? 'Cash' : 'Bank');
       const entry = await this.postAutomaticEntry(tx, {
         organizationId, branchId,
@@ -679,7 +706,7 @@ export class AccountingService {
       });
       const updated = await tx.expense.update({
         where: { id: expenseId },
-        data: { approvalStatus: 'APPROVED', approvedByUserId: actorUserId, journalEntryId: entry.id },
+        data: { journalEntryId: entry.id },
         include: { vendor: true, category: true, attachments: true },
       });
       await writeAuditLog(tx, {

@@ -17,6 +17,12 @@ const moneyString = z
   .transform((v) => String(v))
   .refine((v) => /^\d+(\.\d{1,2})?$/.test(v), 'Must be a non-negative amount with up to 2 decimal places.');
 
+// Phase 15 hardening: recordCateringPaymentSchema.amount used the bare
+// moneyString above, which accepts "0" — a $0 payment record is
+// meaningless and was silently accepted instead of rejected as a likely
+// input mistake. Same fix as lib/validation/order.ts's positiveMoneyString.
+const positiveMoneyString = moneyString.refine((v) => Number(v) > 0, 'Must be a positive amount.');
+
 export const createCateringPackageSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(1000).optional(),
@@ -113,7 +119,7 @@ export type UpdateCateringEventStatusInput = z.infer<typeof updateCateringEventS
 export const recordCateringPaymentSchema = z.object({
   type: z.enum(CATERING_PAYMENT_TYPES),
   method: z.enum(CATERING_PAYMENT_METHODS),
-  amount: moneyString,
+  amount: positiveMoneyString,
   status: z.enum(CATERING_PAYMENT_STATUSES).default('COMPLETED'),
   note: z.string().trim().max(500).optional(),
 });

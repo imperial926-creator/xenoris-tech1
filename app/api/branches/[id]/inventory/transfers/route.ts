@@ -13,7 +13,12 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     const body = await request.json();
     const input = transferStockSchema.parse(body);
     const result = await InventoryService.transferStock(session.organizationId, params.id, input, session.userId);
-    return NextResponse.json(result, { status: 201 });
+    // Phase 15 hardening: was a bare NextResponse.json(result, ...), unlike
+    // every other route in this tree, which wraps its resource under a
+    // named key (e.g. DELETE /branches/[id] returns {branch}). No
+    // dashboard UI consumes this route yet, so this is a clean fix, not a
+    // breaking one.
+    return NextResponse.json({ transfer: result }, { status: 201 });
   } catch (error) {
     return toErrorResponse(error);
   }

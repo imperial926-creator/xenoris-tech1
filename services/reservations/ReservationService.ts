@@ -355,8 +355,16 @@ export class ReservationService {
     const reservation = await this.get(organizationId, branchId, reservationId);
 
     return prisma.$transaction(async (tx) => {
-      const updated = await tx.reservation.update({
-        where: { id: reservationId },
+      // Phase 15 hardening: guards against two concurrent recordDeposit
+      // calls both reading the pre-transaction depositStatus above and
+      // both entering this transaction — without the status in the WHERE
+      // clause, both could transition PENDING -> PAID and both would fire
+      // AccountingService.recordReservationDepositPaid below, double-
+      // posting the deposit to the ledger. updateMany (not update)
+      // because {id, depositStatus} isn't a unique-constraint shape
+      // Prisma's update() accepts.
+      const updateResult = await tx.reservation.updateMany({
+        where: { id: reservationId, depositStatus: reservation.depositStatus },
         data: {
           depositRequired: true,
           depositAmount: input.depositAmount ?? reservation.depositAmount ?? undefined,
@@ -364,6 +372,10 @@ export class ReservationService {
           depositNote: input.depositNote,
         },
       });
+      if (updateResult.count === 0) {
+        throw new ConflictError('Reservation deposit status changed concurrently — reload and try again.');
+      }
+      const updated = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId } });
 
       // Phase 10 — Accounting. Only fires on an actual state transition
       // (not a no-op re-save of the same status), and only for the two

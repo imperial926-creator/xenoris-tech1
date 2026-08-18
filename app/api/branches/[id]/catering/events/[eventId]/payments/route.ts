@@ -21,7 +21,12 @@ export async function POST(
       input,
       session.userId,
     );
-    return NextResponse.json({ event });
+    // Phase 15 hardening: same fix as the sibling orders/[orderId]/
+    // payments route — kept additive (added {payment}, bumped to 201)
+    // rather than replacing {event}, since CateringService.recordPayment's
+    // return contract is relied on directly by several integration tests.
+    const payment = event.payments.reduce((latest, p) => (p.createdAt > latest.createdAt ? p : latest));
+    return NextResponse.json({ event, payment }, { status: 201 });
   } catch (error) {
     return toErrorResponse(error);
   }
