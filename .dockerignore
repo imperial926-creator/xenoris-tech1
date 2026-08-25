@@ -1,0 +1,17 @@
+node_modules
+.next
+.git
+.github
+docs
+tests
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+npm-debug.log*
+.DS_Store
+coverage
+playwright-report
+test-results
+tsconfig.tsbuildinfo

@@ -1,0 +1,91 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { prisma } from '@/lib/db/prisma';
+import { AuthService } from '@/services/auth/AuthService';
+import { BranchService } from '@/services/branches/BranchService';
+import { DeliveryZoneService } from '@/services/delivery/DeliveryZoneService';
+import { resetDatabase } from '../../helpers/db';
+import { ConflictError, NotFoundError } from '@/lib/utils/api-error';
+
+async function setupFixture(suffix: string) {
+  const { user } = await AuthService.register({
+    organizationName: `Zone Test ${suffix}`,
+    organizationEmail: `zone-test-${suffix}@test.local`,
+    firstName: 'Owner',
+    lastName: suffix,
+    email: `owner@zone-test-${suffix}.local`,
+    password: 'SuperSecret123!',
+    currency: 'PHP',
+    timezone: 'Asia/Manila',
+  });
+  const branch = await BranchService.create(user.organizationId, { name: `Branch ${suffix}`, timezone: 'Asia/Manila' }, user.id);
+  return { user, branch };
+}
+
+describe('DeliveryZoneService', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('creates a delivery zone and lists it back', async () => {
+    const { user, branch } = await setupFixture('a');
+    const zone = await DeliveryZoneService.create(
+      user.organizationId, branch.id, { name: 'Downtown', deliveryFee: '50.00' }, user.id,
+    );
+    expect(zone.name).toBe('Downtown');
+    expect(zone.deliveryFee.toString()).toBe('50.00');
+    expect(zone.active).toBe(true);
+
+    const zones = await DeliveryZoneService.list(user.organizationId, branch.id);
+    expect(zones).toHaveLength(1);
+    expect(zones[0].id).toBe(zone.id);
+  });
+
+  it('rejects a duplicate zone name within the same branch', async () => {
+    const { user, branch } = await setupFixture('b');
+    await DeliveryZoneService.create(user.organizationId, branch.id, { name: 'Downtown', deliveryFee: '50.00' }, user.id);
+    await expect(
+      DeliveryZoneService.create(user.organizationId, branch.id, { name: 'Downtown', deliveryFee: '80.00' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('allows the same zone name across two different branches', async () => {
+    const { user, branch } = await setupFixture('c');
+    const branch2 = await BranchService.create(user.organizationId, { name: 'Branch c2', timezone: 'Asia/Manila' }, user.id);
+    await DeliveryZoneService.create(user.organizationId, branch.id, { name: 'Downtown', deliveryFee: '50.00' }, user.id);
+    await expect(
+      DeliveryZoneService.create(user.organizationId, branch2.id, { name: 'Downtown', deliveryFee: '50.00' }, user.id),
+    ).resolves.toBeTruthy();
+  });
+
+  it('updates a zone, including deactivating it', async () => {
+    const { user, branch } = await setupFixture('d');
+    const zone = await DeliveryZoneService.create(user.organizationId, branch.id, { name: 'Downtown', deliveryFee: '50.00' }, user.id);
+    const updated = await DeliveryZoneService.update(user.organizationId, branch.id, zone.id, { active: false }, user.id);
+    expect(updated.active).toBe(false);
+  });
+
+  it('does not allow reading or updating another organization\'s zone', async () => {
+    const orgA = await setupFixture('e');
+    const orgB = await setupFixture('f');
+    const zone = await DeliveryZoneService.create(orgA.user.organizationId, orgA.branch.id, { name: 'Downtown', deliveryFee: '50.00' }, orgA.user.id);
+
+    await expect(
+      DeliveryZoneService.get(orgB.user.organizationId, orgB.branch.id, zone.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    await expect(
+      DeliveryZoneService.update(orgB.user.organizationId, orgB.branch.id, zone.id, { active: false }, orgB.user.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('rejects creating a zone under a branch that does not belong to the organization', async () => {
+    const orgA = await setupFixture('g');
+    const orgB = await setupFixture('h');
+    await expect(
+      DeliveryZoneService.create(orgA.user.organizationId, orgB.branch.id, { name: 'Downtown', deliveryFee: '50.00' }, orgA.user.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+});

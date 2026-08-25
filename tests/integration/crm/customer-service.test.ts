@@ -1,0 +1,422 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { prisma } from '@/lib/db/prisma';
+import { AuthService } from '@/services/auth/AuthService';
+import { BranchService } from '@/services/branches/BranchService';
+import { MenuService } from '@/services/menu/MenuService';
+import { TableService } from '@/services/tables/TableService';
+import { OrderService } from '@/services/orders/OrderService';
+import { ReservationService } from '@/services/reservations/ReservationService';
+import { CateringService } from '@/services/catering/CateringService';
+import { CustomerService } from '@/services/crm/CustomerService';
+import { resetDatabase } from '../../helpers/db';
+import { ConflictError, NotFoundError } from '@/lib/utils/api-error';
+
+async function setupFixture(suffix: string) {
+  const { user } = await AuthService.register({
+    organizationName: `CRM Test ${suffix}`,
+    organizationEmail: `crm-test-${suffix}@test.local`,
+    firstName: 'Owner',
+    lastName: suffix,
+    email: `owner@crm-test-${suffix}.local`,
+    password: 'SuperSecret123!',
+    currency: 'PHP',
+    timezone: 'Asia/Manila',
+  });
+  const branch = await BranchService.create(user.organizationId, { name: `Branch ${suffix}`, timezone: 'Asia/Manila' }, user.id);
+  const category = await MenuService.createCategory(user.organizationId, { name: 'Mains', displayOrder: 0 }, user.id);
+  const item = await MenuService.createItem(
+    user.organizationId,
+    { categoryId: category.id, name: 'Burger', price: '150.00', available: true, taxCategory: 'STANDARD' },
+    user.id,
+  );
+  const item2 = await MenuService.createItem(
+    user.organizationId,
+    { categoryId: category.id, name: 'Fries', price: '80.00', available: true, taxCategory: 'STANDARD' },
+    user.id,
+  );
+  return { user, branch, category, item, item2 };
+}
+
+function hoursFromNow(h: number) {
+  return new Date(Date.now() + h * 60 * 60 * 1000).toISOString();
+}
+
+describe('CustomerService', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  // --- profile CRUD ----------------------------------------------------------
+
+  it('creates a minimal customer with just a first name', async () => {
+    const { user } = await setupFixture('a');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    expect(customer.firstName).toBe('Grace');
+    expect(customer.status).toBe('ACTIVE');
+    expect(customer.userId).toBeNull();
+  });
+
+  it('links a customer profile to an existing user account', async () => {
+    const { user } = await setupFixture('a2');
+    const customer = await CustomerService.create(
+      user.organizationId,
+      { userId: user.id, firstName: 'Owner', lastName: 'a2' },
+      user.id,
+    );
+    expect(customer.userId).toBe(user.id);
+  });
+
+  it('rejects a second customer profile for the same user account', async () => {
+    const { user } = await setupFixture('a3');
+    await CustomerService.create(user.organizationId, { userId: user.id, firstName: 'Owner' }, user.id);
+    await expect(
+      CustomerService.create(user.organizationId, { userId: user.id, firstName: 'Owner Again' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('rejects linking to a user account from another organization', async () => {
+    const orgA = await setupFixture('a4');
+    const orgB = await setupFixture('a5');
+    await expect(
+      CustomerService.create(orgB.user.organizationId, { userId: orgA.user.id, firstName: 'Cross Org' }, orgB.user.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('updates a customer profile', async () => {
+    const { user } = await setupFixture('b');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    const updated = await CustomerService.update(user.organizationId, customer.id, { status: 'BLOCKED' }, user.id);
+    expect(updated.status).toBe('BLOCKED');
+  });
+
+  it('enforces tenant isolation on get/update', async () => {
+    const orgA = await setupFixture('c');
+    const orgB = await setupFixture('d');
+    const customer = await CustomerService.create(orgA.user.organizationId, { firstName: 'Grace' }, orgA.user.id);
+
+    await expect(CustomerService.get(orgB.user.organizationId, customer.id)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(
+      CustomerService.update(orgB.user.organizationId, customer.id, { status: 'BLOCKED' }, orgB.user.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('filters the customer list by status and search term', async () => {
+    const { user } = await setupFixture('e');
+    await CustomerService.create(user.organizationId, { firstName: 'Grace', lastName: 'Villanueva' }, user.id);
+    const marco = await CustomerService.create(user.organizationId, { firstName: 'Marco', lastName: 'dela Pena' }, user.id);
+    await CustomerService.update(user.organizationId, marco.id, { status: 'INACTIVE' }, user.id);
+
+    const active = await CustomerService.list(user.organizationId, {});
+    expect(active).toHaveLength(2);
+
+    const onlyInactive = await CustomerService.list(user.organizationId, { status: 'INACTIVE' });
+    expect(onlyInactive).toHaveLength(1);
+    expect(onlyInactive[0].firstName).toBe('Marco');
+
+    const searched = await CustomerService.list(user.organizationId, { search: 'Villanueva' });
+    expect(searched).toHaveLength(1);
+    expect(searched[0].firstName).toBe('Grace');
+  });
+
+  // --- addresses / preferences / notes / tags ---------------------------------
+
+  it('enforces single-default exclusivity across a customer\'s addresses', async () => {
+    const { user } = await setupFixture('f');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    const addr1 = await CustomerService.addAddress(user.organizationId, customer.id, { line1: '123 Rizal St', isDefault: true }, user.id);
+    const addr2 = await CustomerService.addAddress(user.organizationId, customer.id, { line1: '456 Mabini St', isDefault: true }, user.id);
+
+    const refreshed1 = await prisma.customerAddress.findUniqueOrThrow({ where: { id: addr1.id } });
+    const refreshed2 = await prisma.customerAddress.findUniqueOrThrow({ where: { id: addr2.id } });
+    expect(refreshed1.isDefault).toBe(false);
+    expect(refreshed2.isDefault).toBe(true);
+
+    await CustomerService.deleteAddress(user.organizationId, customer.id, addr2.id, user.id);
+    await expect(prisma.customerAddress.findUniqueOrThrow({ where: { id: addr2.id } })).rejects.toThrow();
+  });
+
+  it('upserts a customer preference by key', async () => {
+    const { user } = await setupFixture('g');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    await CustomerService.setPreference(user.organizationId, customer.id, { key: 'dietary', value: 'No seafood' }, user.id);
+    const updated = await CustomerService.setPreference(user.organizationId, customer.id, { key: 'dietary', value: 'Vegetarian' }, user.id);
+    expect(updated.value).toBe('Vegetarian');
+
+    const all = await prisma.customerPreference.findMany({ where: { customerId: customer.id } });
+    expect(all).toHaveLength(1);
+
+    await CustomerService.removePreference(user.organizationId, customer.id, 'dietary', user.id);
+    expect(await prisma.customerPreference.findMany({ where: { customerId: customer.id } })).toHaveLength(0);
+  });
+
+  it('adds a note authored by the acting user', async () => {
+    const { user } = await setupFixture('h');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    const note = await CustomerService.addNote(user.organizationId, customer.id, 'Prefers a window seat.', user.id);
+    expect(note.authorUserId).toBe(user.id);
+    expect(note.note).toBe('Prefers a window seat.');
+  });
+
+  it('rejects a duplicate tag but allows removing and re-adding it', async () => {
+    const { user } = await setupFixture('i');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    await CustomerService.addTag(user.organizationId, customer.id, 'regular', user.id);
+    await expect(CustomerService.addTag(user.organizationId, customer.id, 'regular', user.id)).rejects.toBeInstanceOf(ConflictError);
+
+    await CustomerService.removeTag(user.organizationId, customer.id, 'regular', user.id);
+    const retagged = await CustomerService.addTag(user.organizationId, customer.id, 'regular', user.id);
+    expect(retagged.tag).toBe('regular');
+  });
+
+  // --- reviews -----------------------------------------------------------------
+
+  it('records a standalone review with no linked records', async () => {
+    const { user } = await setupFixture('j');
+    const review = await CustomerService.addReview(user.organizationId, { rating: 4, comment: 'Great service' }, user.id);
+    expect(review.rating).toBe(4);
+    expect(review.customerId).toBeNull();
+    expect(review.recordedByUserId).toBe(user.id);
+  });
+
+  it('rejects a review linked to an order from another organization', async () => {
+    const orgA = await setupFixture('k');
+    const orgB = await setupFixture('l');
+    const order = await OrderService.createOrder(
+      orgA.user.organizationId,
+      orgA.branch.id,
+      { type: 'TAKEOUT', discountAmount: '0.00', items: [{ menuItemId: orgA.item.id, quantity: 1, modifierIds: [] }] },
+      orgA.user.id,
+    );
+    await expect(
+      CustomerService.addReview(orgB.user.organizationId, { orderId: order.id, rating: 5 }, orgB.user.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('links a review to a customer and lists it back via listReviews', async () => {
+    const { user } = await setupFixture('m');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    await CustomerService.addReview(user.organizationId, { customerId: customer.id, rating: 5, comment: 'Loved it' }, user.id);
+    const reviews = await CustomerService.listReviews(user.organizationId, customer.id);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0].rating).toBe(5);
+  });
+
+  // --- customerId wiring on Order/Reservation/CateringInquiry ------------------
+
+  it('rejects an order created with a customerId from another organization', async () => {
+    const orgA = await setupFixture('n');
+    const orgB = await setupFixture('o');
+    const foreignCustomer = await CustomerService.create(orgA.user.organizationId, { firstName: 'Grace' }, orgA.user.id);
+
+    await expect(
+      OrderService.createOrder(
+        orgB.user.organizationId,
+        orgB.branch.id,
+        {
+          type: 'TAKEOUT',
+          discountAmount: '0.00',
+          customerId: foreignCustomer.id,
+          items: [{ menuItemId: orgB.item.id, quantity: 1, modifierIds: [] }],
+        },
+        orgB.user.id,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('attaches a customerId to an order created in the same organization', async () => {
+    const { user, branch, item } = await setupFixture('p');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace' }, user.id);
+    const order = await OrderService.createOrder(
+      user.organizationId,
+      branch.id,
+      { type: 'TAKEOUT', discountAmount: '0.00', customerId: customer.id, items: [{ menuItemId: item.id, quantity: 1, modifierIds: [] }] },
+      user.id,
+    );
+    expect(order.customerId).toBe(customer.id);
+  });
+
+  it('rejects a reservation created with a customerId from another organization', async () => {
+    const orgA = await setupFixture('q');
+    const orgB = await setupFixture('r');
+    const foreignCustomer = await CustomerService.create(orgA.user.organizationId, { firstName: 'Grace' }, orgA.user.id);
+    const table = await TableService.createTable(orgB.user.organizationId, orgB.branch.id, { tableNumber: 'T1', capacity: 4 }, orgB.user.id);
+
+    await expect(
+      ReservationService.createReservation(
+        orgB.user.organizationId,
+        orgB.branch.id,
+        {
+          tableIds: [table.id],
+          startAt: hoursFromNow(24),
+          durationMinutes: 90,
+          guestCount: 2,
+          customerId: foreignCustomer.id,
+          guestName: 'Guest',
+          depositRequired: false,
+        },
+        orgB.user.id,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('rejects a catering inquiry created with a customerId from another organization', async () => {
+    const orgA = await setupFixture('s');
+    const orgB = await setupFixture('t');
+    const foreignCustomer = await CustomerService.create(orgA.user.organizationId, { firstName: 'Grace' }, orgA.user.id);
+
+    await expect(
+      CateringService.createInquiry(
+        orgB.user.organizationId,
+        orgB.branch.id,
+        {
+          customerId: foreignCustomer.id,
+          eventType: 'Wedding',
+          eventDate: hoursFromNow(24 * 30),
+          location: 'Function Hall',
+          guestCount: 100,
+          deliveryRequested: false,
+        },
+        orgB.user.id,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('copies customerId from the inquiry onto the CateringEvent automatically when a quote is accepted', async () => {
+    const { user, branch } = await setupFixture('u');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Patricia', lastName: 'Cruz' }, user.id);
+    const inquiry = await CateringService.createInquiry(
+      user.organizationId,
+      branch.id,
+      {
+        customerId: customer.id,
+        eventType: 'Corporate',
+        eventDate: hoursFromNow(24 * 14),
+        location: 'Office Rooftop',
+        guestCount: 50,
+        deliveryRequested: false,
+      },
+      user.id,
+    );
+    const quote = await CateringService.createQuote(
+      user.organizationId,
+      branch.id,
+      {
+        inquiryId: inquiry.id,
+        guestCount: 50,
+        items: [{ description: 'Buffet package', quantity: 1, unitPrice: '150000.00' }],
+        staffingTotal: '0.00',
+        equipmentTotal: '0.00',
+        transportationTotal: '0.00',
+        setupTotal: '0.00',
+        serviceFeeTotal: '0.00',
+        discountTotal: '0.00',
+      },
+      user.id,
+    );
+    await CateringService.updateQuoteStatus(user.organizationId, branch.id, quote.id, { status: 'SENT' }, user.id);
+    await CateringService.updateQuoteStatus(user.organizationId, branch.id, quote.id, { status: 'ACCEPTED' }, user.id);
+
+    const event = await prisma.cateringEvent.findFirstOrThrow({ where: { inquiryId: inquiry.id } });
+    expect(event.customerId).toBe(customer.id);
+
+    // This single, very large transaction should classify the customer as
+    // HIGH_VALUE — regression coverage (at the integration level) for the
+    // same precedence bug fixed in lib/crm/rfm.ts (see tests/unit/crm/rfm.test.ts).
+    const analytics = await CustomerService.getAnalytics(user.organizationId, customer.id);
+    expect(analytics.totalCateringOrders).toBe(1);
+    expect(analytics.rfm.segment).toBe('HIGH_VALUE');
+  });
+
+  // --- analytics / RFM -----------------------------------------------------------
+
+  it('computes lifetime-value analytics and favorite products from real orders', async () => {
+    const { user, branch, item, item2 } = await setupFixture('v');
+    const customer = await CustomerService.create(user.organizationId, { firstName: 'Grace', lastName: 'Villanueva' }, user.id);
+
+    const order1 = await OrderService.createOrder(
+      user.organizationId,
+      branch.id,
+      {
+        type: 'TAKEOUT',
+        discountAmount: '0.00',
+        customerId: customer.id,
+        items: [
+          { menuItemId: item.id, quantity: 3, modifierIds: [] },
+          { menuItemId: item2.id, quantity: 1, modifierIds: [] },
+        ],
+      },
+      user.id,
+    );
+    // 3x150.00 + 1x80.00 = 530.00 subtotal, 12% VAT = 63.60, total 593.60
+    expect(order1.total.toString()).toBe('593.60');
+
+    const order2 = await OrderService.createOrder(
+      user.organizationId,
+      branch.id,
+      {
+        type: 'TAKEOUT',
+        discountAmount: '0.00',
+        customerId: customer.id,
+        items: [
+          { menuItemId: item.id, quantity: 1, modifierIds: [] },
+          { menuItemId: item2.id, quantity: 2, modifierIds: [] },
+        ],
+      },
+      user.id,
+    );
+    // 1x150.00 + 2x80.00 = 310.00 subtotal, 12% VAT = 37.20, total 347.20
+    expect(order2.total.toString()).toBe('347.20');
+
+    // A cancelled order must not count toward spend/frequency.
+    const cancelled = await OrderService.createOrder(
+      user.organizationId,
+      branch.id,
+      { type: 'TAKEOUT', discountAmount: '0.00', customerId: customer.id, items: [{ menuItemId: item.id, quantity: 5, modifierIds: [] }] },
+      user.id,
+    );
+    await OrderService.updateStatus(
+      user.organizationId,
+      branch.id,
+      cancelled.id,
+      { status: 'CANCELLED', cancellationReason: 'Customer changed their mind' },
+      user.id,
+    );
+
+    const analytics = await CustomerService.getAnalytics(user.organizationId, customer.id);
+    expect(analytics.totalOrders).toBe(2);
+    expect(analytics.totalSpending).toBe('940.80');
+    expect(analytics.averageOrderValue).toBe('470.40');
+    expect(analytics.favoriteProducts[0].name).toBe('Burger');
+    expect(analytics.favoriteProducts[0].quantity).toBe(4);
+    expect(analytics.favoriteProducts[1].name).toBe('Fries');
+    expect(analytics.favoriteProducts[1].quantity).toBe(3);
+    // frequency=2 (<=1 is NEW, not met), monetary well under both HIGH_VALUE
+    // and VIP thresholds, recency ~0 days (not AT_RISK/INACTIVE), frequency
+    // 2 < regularMinTransactions(5) — falls through to RETURNING.
+    expect(analytics.rfm.segment).toBe('RETURNING');
+  });
+
+  it('summarizes segment counts across every customer in the organization', async () => {
+    const { user } = await setupFixture('w');
+    // NEW: no transactions at all.
+    await CustomerService.create(user.organizationId, { firstName: 'Marco' }, user.id);
+    // Another NEW customer, to confirm counts aggregate rather than overwrite.
+    await CustomerService.create(user.organizationId, { firstName: 'Ana' }, user.id);
+
+    const breakdown = await CustomerService.segmentBreakdown(user.organizationId);
+    expect(breakdown.NEW).toBe(2);
+    expect(breakdown.HIGH_VALUE).toBe(0);
+    expect(Object.values(breakdown).reduce((a, b) => a + b, 0)).toBe(2);
+  });
+
+  it('rejects fetching analytics for a customer outside the caller\'s organization', async () => {
+    const orgA = await setupFixture('x');
+    const orgB = await setupFixture('y');
+    const customer = await CustomerService.create(orgA.user.organizationId, { firstName: 'Grace' }, orgA.user.id);
+    await expect(CustomerService.getAnalytics(orgB.user.organizationId, customer.id)).rejects.toBeInstanceOf(NotFoundError);
+  });
+});

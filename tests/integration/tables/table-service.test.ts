@@ -1,0 +1,119 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { prisma } from '@/lib/db/prisma';
+import { AuthService } from '@/services/auth/AuthService';
+import { BranchService } from '@/services/branches/BranchService';
+import { TableService } from '@/services/tables/TableService';
+import { resetDatabase } from '../../helpers/db';
+import { ConflictError, NotFoundError } from '@/lib/utils/api-error';
+
+async function setupOrgWithBranch(suffix: string) {
+  const { user } = await AuthService.register({
+    organizationName: `Table Test ${suffix}`,
+    organizationEmail: `table-test-${suffix}@test.local`,
+    firstName: 'Owner',
+    lastName: suffix,
+    email: `owner@table-test-${suffix}.local`,
+    password: 'SuperSecret123!',
+    currency: 'PHP',
+    timezone: 'Asia/Manila',
+  });
+  const branch = await BranchService.create(
+    user.organizationId,
+    { name: `Branch ${suffix}`, timezone: 'Asia/Manila' },
+    user.id,
+  );
+  return { user, branch };
+}
+
+describe('TableService', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('creates a table and records its initial status in history', async () => {
+    const { user, branch } = await setupOrgWithBranch('a');
+    const table = await TableService.createTable(
+      user.organizationId,
+      branch.id,
+      { tableNumber: 'T1', capacity: 4 },
+      user.id,
+    );
+    expect(table.status).toBe('AVAILABLE');
+
+    const history = await TableService.getStatusHistory(user.organizationId, branch.id, table.id);
+    expect(history).toHaveLength(1);
+    expect(history[0].fromStatus).toBeNull();
+    expect(history[0].toStatus).toBe('AVAILABLE');
+  });
+
+  it('rejects a duplicate table number within the same branch', async () => {
+    const { user, branch } = await setupOrgWithBranch('b');
+    await TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T1', capacity: 4 }, user.id);
+    await expect(
+      TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T1', capacity: 2 }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('allows a legal status transition and records it', async () => {
+    const { user, branch } = await setupOrgWithBranch('c');
+    const table = await TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T1', capacity: 4 }, user.id);
+
+    const updated = await TableService.updateStatus(
+      user.organizationId,
+      branch.id,
+      table.id,
+      { status: 'OCCUPIED' },
+      user.id,
+    );
+    expect(updated.status).toBe('OCCUPIED');
+
+    const history = await TableService.getStatusHistory(user.organizationId, branch.id, table.id);
+    expect(history[0].fromStatus).toBe('AVAILABLE');
+    expect(history[0].toStatus).toBe('OCCUPIED');
+  });
+
+  it('rejects an illegal status transition (CLEANING -> RESERVED)', async () => {
+    const { user, branch } = await setupOrgWithBranch('d');
+    const table = await TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T1', capacity: 4 }, user.id);
+    await TableService.updateStatus(user.organizationId, branch.id, table.id, { status: 'OCCUPIED' }, user.id);
+    await TableService.updateStatus(user.organizationId, branch.id, table.id, { status: 'CLEANING' }, user.id);
+
+    await expect(
+      TableService.updateStatus(user.organizationId, branch.id, table.id, { status: 'RESERVED' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('does not expose a table from another branch/organization', async () => {
+    const orgA = await setupOrgWithBranch('e');
+    const orgB = await setupOrgWithBranch('f');
+    const table = await TableService.createTable(
+      orgA.user.organizationId,
+      orgA.branch.id,
+      { tableNumber: 'T1', capacity: 4 },
+      orgA.user.id,
+    );
+
+    await expect(
+      TableService.getTable(orgB.user.organizationId, orgB.branch.id, table.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('unassigns a table from a section when the section is deleted (SET NULL, not cascade)', async () => {
+    const { user, branch } = await setupOrgWithBranch('g');
+    const section = await TableService.createSection(user.organizationId, branch.id, { name: 'Patio' }, user.id);
+    const table = await TableService.createTable(
+      user.organizationId,
+      branch.id,
+      { tableNumber: 'T1', capacity: 4, sectionId: section.id },
+      user.id,
+    );
+    await prisma.tableSection.delete({ where: { id: section.id } });
+
+    const refreshed = await TableService.getTable(user.organizationId, branch.id, table.id);
+    expect(refreshed.sectionId).toBeNull();
+  });
+});

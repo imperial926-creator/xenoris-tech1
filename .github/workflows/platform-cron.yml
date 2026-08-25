@@ -1,0 +1,77 @@
+name: Platform Admin Cron Jobs
+
+# This codebase has no in-process job scheduler by design (see
+# SubscriptionRetryService.ts's header and CLAUDE.md → Known Issues) — every
+# "automatic" background behavior is a plain, `x-cron-secret`-guarded POST
+# route, meant to be called by an EXTERNAL scheduler. This workflow is that
+# external scheduler: it does nothing but call each guarded route on a
+# schedule. It has NOT been run in this sandbox (no GitHub Actions runner
+# available here) — review the schedules below and confirm each route name
+# still matches the deployed app before relying on it.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   APP_URL           the deployed app's public base URL, no trailing slash
+#                      (e.g. https://your-app.up.railway.app)
+#   PLATFORM_CRON_SECRET   must match the same-named env var set on the app
+
+on:
+  schedule:
+    # Subscription payment retries (Phase 17) — hourly.
+    - cron: '0 * * * *'
+    # Complaint SLA escalation (Phase 18 §21) — every 30 minutes.
+    - cron: '*/30 * * * *'
+    # Renewal follow-up generation (Phase 18) — daily at 02:00 UTC.
+    - cron: '0 2 * * *'
+    # Anomaly detection sweep (Phase 18) — daily at 03:00 UTC.
+    - cron: '0 3 * * *'
+    # Restaurant engagement snapshots (Phase 18) — daily at 04:00 UTC.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    # Manual trigger — lets you run every route once on demand (e.g. right
+    # after first deploy) instead of waiting for the next scheduled tick.
+
+jobs:
+  subscription-retries:
+    if: github.event.schedule == '0 * * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call subscription-retries
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/platform-admin/cron/subscription-retries" \
+            -H "x-cron-secret: ${{ secrets.PLATFORM_CRON_SECRET }}"
+
+  complaints-sla:
+    if: github.event.schedule == '*/30 * * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call complaints-sla
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/platform-admin/cron/complaints-sla" \
+            -H "x-cron-secret: ${{ secrets.PLATFORM_CRON_SECRET }}"
+
+  renewal-follow-ups:
+    if: github.event.schedule == '0 2 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call renewal-follow-ups
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/platform-admin/cron/renewal-follow-ups" \
+            -H "x-cron-secret: ${{ secrets.PLATFORM_CRON_SECRET }}"
+
+  anomaly-sweep:
+    if: github.event.schedule == '0 3 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call anomaly-sweep
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/platform-admin/cron/anomaly-sweep" \
+            -H "x-cron-secret: ${{ secrets.PLATFORM_CRON_SECRET }}"
+
+  engagement-snapshots:
+    if: github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call engagement-snapshots
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/platform-admin/cron/engagement-snapshots" \
+            -H "x-cron-secret: ${{ secrets.PLATFORM_CRON_SECRET }}"
