@@ -19,7 +19,7 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
-    "next": "14.2.5",
+    "next": "15.5.27",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "@prisma/client": "5.18.0",
