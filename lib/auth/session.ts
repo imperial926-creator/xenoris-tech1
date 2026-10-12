@@ -1,3 +1,4 @@
+
 import 'server-only';
 import { SignJWT, jwtVerify } from 'jose';
 import { cookies } from 'next/headers';
@@ -24,7 +25,9 @@ function getSecretKey(): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-export async function createSessionToken(payload: SessionPayload): Promise<string> {
+export async function createSessionToken(
+  payload: SessionPayload,
+): Promise<string> {
   return new SignJWT({ ...payload })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
@@ -32,9 +35,12 @@ export async function createSessionToken(payload: SessionPayload): Promise<strin
     .sign(getSecretKey());
 }
 
-export async function verifySessionToken(token: string): Promise<SessionPayload | null> {
+export async function verifySessionToken(
+  token: string,
+): Promise<SessionPayload | null> {
   try {
     const { payload } = await jwtVerify(token, getSecretKey());
+
     if (
       typeof payload.userId === 'string' &&
       typeof payload.organizationId === 'string' &&
@@ -48,15 +54,18 @@ export async function verifySessionToken(token: string): Promise<SessionPayload 
         roles: payload.roles as string[],
       };
     }
+
     return null;
   } catch {
-    // Expired, malformed, or forged token — treat identically as "no session".
+    // Expired, malformed, or forged token — treat as no session.
     return null;
   }
 }
 
 export async function setSessionCookie(token: string): Promise<void> {
-  cookies().set(AUTH_COOKIE_NAME, token, {
+  const cookieStore = await cookies();
+
+  cookieStore.set(AUTH_COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
@@ -66,7 +75,9 @@ export async function setSessionCookie(token: string): Promise<void> {
 }
 
 export async function clearSessionCookie(): Promise<void> {
-  cookies().set(AUTH_COOKIE_NAME, '', {
+  const cookieStore = await cookies();
+
+  cookieStore.set(AUTH_COOKIE_NAME, '', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
@@ -76,7 +87,11 @@ export async function clearSessionCookie(): Promise<void> {
 }
 
 export async function getSession(): Promise<SessionPayload | null> {
-  const token = cookies().get(AUTH_COOKIE_NAME)?.value;
+  const cookieStore = await cookies();
+  const token = cookieStore.get(AUTH_COOKIE_NAME)?.value;
+
   if (!token) return null;
+
   return verifySessionToken(token);
 }
+

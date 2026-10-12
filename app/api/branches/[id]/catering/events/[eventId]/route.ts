@@ -7,11 +7,24 @@ import { CateringService } from '@/services/catering/CateringService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; eventId: string } },
+  { params }: {
+    params: Promise<{ id: string; eventId: string }>;
+  },
 ) {
   try {
-    const session = await requirePermission(await getSession(), PERMISSIONS.CATERING_MANAGE);
-    const event = await CateringService.getEvent(session.organizationId, params.id, params.eventId);
+    const { id, eventId } = await params;
+
+    const session = await requirePermission(
+      await getSession(),
+      PERMISSIONS.CATERING_MANAGE,
+    );
+
+    const event = await CateringService.getEvent(
+      session.organizationId,
+      id,
+      eventId,
+    );
+
     return NextResponse.json({ event });
   } catch (error) {
     return toErrorResponse(error);
