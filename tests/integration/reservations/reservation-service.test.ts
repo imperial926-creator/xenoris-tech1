@@ -61,7 +61,9 @@ describe('ReservationService', () => {
     );
     expect(reservation.status).toBe('PENDING');
     expect(reservation.tables).toHaveLength(1);
-    expect(reservation.tables[0].table.id).toBe(table.id);
+    const firstReservationTable = reservation.tables[0];
+    if (!firstReservationTable) throw new Error('Expected one reservation table');
+    expect(firstReservationTable.table.id).toBe(table.id);
 
     const available = await ReservationService.findAvailableTables(user.organizationId, branch.id, {
       startAt,
@@ -225,7 +227,7 @@ describe('ReservationService', () => {
       user.id,
     );
     expect(updated.depositStatus).toBe('PAID');
-    expect(String(updated.depositAmount)).toBe('750.00');
+    expect(updated.depositAmount?.toFixed(2)).toBe('750.00');
   });
 
   /**

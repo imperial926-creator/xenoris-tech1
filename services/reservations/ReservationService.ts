@@ -137,10 +137,13 @@ export class ReservationService {
   static async createReservation(
     organizationId: string,
     branchId: string,
-    input: CreateReservationInput,
+    input: Omit<CreateReservationInput, 'depositRequired'> & {
+  depositRequired?: boolean;
+},
     actorUserId: string,
   ) {
-    await this.assertBranchInOrg(organizationId, branchId);
+    await this.assertBranchInOrg(organizationId, branchId);    
+ const depositRequired = input.depositRequired ?? false;
     const { startAt, endAt } = this.resolveWindow(input.startAt, input.durationMinutes);
     if (startAt <= new Date(Date.now() - 5 * 60 * 1000)) {
       // Small grace window rather than a hard ">= now" check, so a request
@@ -187,9 +190,9 @@ export class ReservationService {
             guestCount: input.guestCount,
             specialRequests: input.specialRequests,
             occasion: input.occasion,
-            depositRequired: input.depositRequired,
+            depositRequired,
             depositAmount: input.depositAmount,
-            depositStatus: input.depositRequired ? 'PENDING' : 'NONE',
+            depositStatus: depositRequired ? 'PENDING' : 'NONE',
             depositNote: input.depositNote,
           },
         });

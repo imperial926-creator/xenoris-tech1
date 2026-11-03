@@ -13,8 +13,9 @@ import { KitchenService } from '@/services/kitchen/KitchenService';
  */
 export async function POST(
   _request: NextRequest,
-  { params }: { params: { id: string; orderId: string } },
+  props: { params: Promise<{ id: string; orderId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.ORDER_MANAGE);
     const order = await KitchenService.advanceStatus(

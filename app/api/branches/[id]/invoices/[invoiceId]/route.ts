@@ -7,8 +7,9 @@ import { InvoiceService } from '@/services/invoicing/InvoiceService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; invoiceId: string } },
+  props: { params: Promise<{ id: string; invoiceId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.ORDER_MANAGE);
     const invoice = await InvoiceService.get(session.organizationId, params.id, params.invoiceId);

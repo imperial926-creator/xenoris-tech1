@@ -22,7 +22,8 @@ function assertSameOrg(paramsId: string, sessionOrgId: string) {
   }
 }
 
-export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.BRANCH_VIEW);
     assertSameOrg(params.id, session.organizationId);
@@ -33,7 +34,8 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
   }
 }
 
-export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.ORG_MANAGE);
     assertSameOrg(params.id, session.organizationId);

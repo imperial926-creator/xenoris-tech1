@@ -13,7 +13,7 @@ import { resetDatabase } from '../../helpers/db';
 import type { CreateCateringQuoteInput } from '@/lib/validation/catering';
 
 /**
- * Master spec §49: "Create automated tests proving Total Debits = Total
+ * Master spec Â§49: "Create automated tests proving Total Debits = Total
  * Credits. Test: Revenue, Deposits, Refunds, Expenses, Inventory, COGS,
  * Accounts receivable, Accounts payable. Also test that deleting an order
  * does not corrupt accounting history." This file drives every one of those
@@ -25,7 +25,7 @@ import type { CreateCateringQuoteInput } from '@/lib/validation/catering';
 
 async function accountsByName(organizationId: string) {
   const list = await AccountingService.listAccounts(organizationId, {});
-  // Explicit generic + populate-by-loop, not `new Map(list.map(...))` — see
+  // Explicit generic + populate-by-loop, not `new Map(list.map(...))` â€” see
   // prisma/seed.ts's identical fix; inferring the Map's value type straight
   // from a `.map()` callback collapses to `{}` under this project's
   // noUncheckedIndexedAccess + strict settings once Prisma's types are involved.
@@ -72,7 +72,7 @@ async function stockRecipeFor(organizationId: string, branchId: string, menuItem
   return { kilogram, chicken, item };
 }
 
-describe('Financial transaction engine — order revenue + COGS', () => {
+describe('Financial transaction engine â€” order revenue + COGS', () => {
   beforeEach(async () => {
     await resetDatabase();
   });
@@ -90,8 +90,8 @@ describe('Financial transaction engine — order revenue + COGS', () => {
       user.id,
     );
     // 2 x 220.00 = 440.00 subtotal, 12% VAT = 52.80, total = 492.80.
-    expect(order.total.toString()).toBe('492.80');
-    await OrderService.recordPayment(user.organizationId, branch.id, order.id, { method: 'CASH', amount: order.total.toString(), status: 'COMPLETED' }, user.id);
+    expect(order.total.toFixed(2)).toBe('492.80');
+    await OrderService.recordPayment(user.organizationId, branch.id, order.id, { method: 'CASH', amount: order.total.toFixed(2), status: 'COMPLETED' }, user.id);
 
     for (const status of ['CONFIRMED', 'PREPARING', 'READY', 'COMPLETED'] as const) {
       await OrderService.updateStatus(user.organizationId, branch.id, order.id, { status }, user.id);
@@ -109,21 +109,21 @@ describe('Financial transaction engine — order revenue + COGS', () => {
     const revenueCreditTotal = revenueEntry.lines.reduce((sum, l) => sum + Number(l.credit), 0);
     expect(revenueDebitTotal).toBe(revenueCreditTotal); // balanced
     const cashLine = revenueEntry.lines.find((l) => l.accountId === acc.get('Cash')!.id)!;
-    expect(cashLine.debit.toString()).toBe('492.80'); // fully paid -> all Cash, no AR
+    expect(cashLine.debit.toFixed(2)).toBe('492.80'); // fully paid -> all Cash, no AR
     const arLine = revenueEntry.lines.find((l) => l.accountId === acc.get('Accounts Receivable')!.id);
     expect(arLine).toBeUndefined();
     const taxLine = revenueEntry.lines.find((l) => l.accountId === acc.get('Taxes Payable')!.id)!;
-    expect(taxLine.credit.toString()).toBe('52.80');
+    expect(taxLine.credit.toFixed(2)).toBe('52.80');
 
     const cogsEntry = revenueEntries.find((e) => e.lines.some((l) => l.accountId === acc.get('Food Cost')!.id))!;
     const cogsDebitTotal = cogsEntry.lines.reduce((sum, l) => sum + Number(l.debit), 0);
     const cogsCreditTotal = cogsEntry.lines.reduce((sum, l) => sum + Number(l.credit), 0);
     expect(cogsDebitTotal).toBe(cogsCreditTotal);
-    // 2 orders x 0.25kg x ₱180.00/kg = ₱90.00 COGS.
+    // 2 orders x 0.25kg x â‚±180.00/kg = â‚±90.00 COGS.
     const foodCostLine = cogsEntry.lines.find((l) => l.accountId === acc.get('Food Cost')!.id)!;
-    expect(foodCostLine.debit.toString()).toBe('90.00');
+    expect(foodCostLine.debit.toFixed(2)).toBe('90.00');
     const inventoryLine = cogsEntry.lines.find((l) => l.accountId === acc.get('Inventory')!.id)!;
-    expect(inventoryLine.credit.toString()).toBe('90.00');
+    expect(inventoryLine.credit.toFixed(2)).toBe('90.00');
   });
 
   it('completing an order with a partial payment splits revenue between Cash and Accounts Receivable', async () => {
@@ -146,21 +146,21 @@ describe('Financial transaction engine — order revenue + COGS', () => {
     });
     const cashLine = entry.lines.find((l) => l.accountId === acc.get('Cash')!.id)!;
     const arLine = entry.lines.find((l) => l.accountId === acc.get('Accounts Receivable')!.id)!;
-    expect(cashLine.debit.toString()).toBe('100.00');
-    expect(arLine.debit.toString()).toBe('146.40'); // 246.40 - 100.00
+    expect(cashLine.debit.toFixed(2)).toBe('100.00');
+    expect(arLine.debit.toFixed(2)).toBe('146.40'); // 246.40 - 100.00
     const debitTotal = entry.lines.reduce((sum, l) => sum + Number(l.debit), 0);
     const creditTotal = entry.lines.reduce((sum, l) => sum + Number(l.credit), 0);
     expect(debitTotal).toBe(creditTotal);
   });
 
-  it('deleting an order does not corrupt its accounting history — the journal entry and lines survive independently', async () => {
+  it('deleting an order does not corrupt its accounting history â€” the journal entry and lines survive independently', async () => {
     const { user, branch, table, item } = await setupRestaurantFixture('c');
     const order = await OrderService.createOrder(
       user.organizationId, branch.id,
       { type: 'TAKEOUT', discountAmount: '0.00', items: [{ menuItemId: item.id, quantity: 1, modifierIds: [] }] },
       user.id,
     );
-    await OrderService.recordPayment(user.organizationId, branch.id, order.id, { method: 'CASH', amount: order.total.toString(), status: 'COMPLETED' }, user.id);
+    await OrderService.recordPayment(user.organizationId, branch.id, order.id, { method: 'CASH', amount: order.total.toFixed(2), status: 'COMPLETED' }, user.id);
     for (const status of ['CONFIRMED', 'PREPARING', 'READY', 'COMPLETED'] as const) {
       await OrderService.updateStatus(user.organizationId, branch.id, order.id, { status }, user.id);
     }
@@ -168,7 +168,7 @@ describe('Financial transaction engine — order revenue + COGS', () => {
       where: { organizationId: user.organizationId, referenceType: 'Order', referenceId: order.id },
     });
 
-    // Direct deletion (bypassing any service-level restriction) — proves the
+    // Direct deletion (bypassing any service-level restriction) â€” proves the
     // ledger has no FK dependency back onto Order at all, only the loose
     // referenceType/referenceId string link.
     await prisma.orderItem.deleteMany({ where: { orderId: order.id } });
@@ -186,7 +186,7 @@ describe('Financial transaction engine — order revenue + COGS', () => {
   });
 });
 
-describe('Financial transaction engine — reservation deposits (paid, refunded, earned)', () => {
+describe('Financial transaction engine â€” reservation deposits (paid, refunded, earned)', () => {
   beforeEach(async () => {
     await resetDatabase();
   });
@@ -210,11 +210,11 @@ describe('Financial transaction engine — reservation deposits (paid, refunded,
     });
     const cashLine = entry.lines.find((l) => l.accountId === acc.get('Cash')!.id)!;
     const depositsLine = entry.lines.find((l) => l.accountId === acc.get('Customer Deposits')!.id)!;
-    expect(cashLine.debit.toString()).toBe('750.00');
-    expect(depositsLine.credit.toString()).toBe('750.00');
+    expect(cashLine.debit.toFixed(2)).toBe('750.00');
+    expect(depositsLine.credit.toFixed(2)).toBe('750.00');
   });
 
-  it('refunding a PAID deposit reverses Cash / Customer Deposits — a balanced refund entry', async () => {
+  it('refunding a PAID deposit reverses Cash / Customer Deposits â€” a balanced refund entry', async () => {
     const { user, branch, table } = await setupRestaurantFixture('e');
     const reservation = await ReservationService.createReservation(
       user.organizationId, branch.id,
@@ -233,8 +233,8 @@ describe('Financial transaction engine — reservation deposits (paid, refunded,
     const refundEntry = entries.find((e) => e.description.toLowerCase().includes('refund'))!;
     const cashLine = refundEntry.lines.find((l) => l.accountId === acc.get('Cash')!.id)!;
     const depositsLine = refundEntry.lines.find((l) => l.accountId === acc.get('Customer Deposits')!.id)!;
-    expect(cashLine.credit.toString()).toBe('750.00');
-    expect(depositsLine.debit.toString()).toBe('750.00');
+    expect(cashLine.credit.toFixed(2)).toBe('750.00');
+    expect(depositsLine.debit.toFixed(2)).toBe('750.00');
   });
 
   it('a reservation reaching COMPLETED with a PAID deposit recognizes the deposit as earned revenue', async () => {
@@ -250,7 +250,7 @@ describe('Financial transaction engine — reservation deposits (paid, refunded,
     await ReservationService.updateStatus(user.organizationId, branch.id, reservation.id, { status: 'COMPLETED' }, user.id);
 
     const acc = await accountsByName(user.organizationId);
-    // Two entries share this (referenceType, referenceId) — DEPOSIT_RECEIVED
+    // Two entries share this (referenceType, referenceId) â€” DEPOSIT_RECEIVED
     // (from recordDeposit above) and DEPOSIT_EARNED (from this COMPLETED
     // transition); ordering by createdAt picks the later, earned one.
     const earnedEntry = await prisma.journalEntry.findFirstOrThrow({
@@ -260,8 +260,8 @@ describe('Financial transaction engine — reservation deposits (paid, refunded,
     });
     const depositsLine = earnedEntry.lines.find((l) => l.accountId === acc.get('Customer Deposits')!.id)!;
     const revenueLine = earnedEntry.lines.find((l) => l.accountId === acc.get('Dine-in Revenue')!.id)!;
-    expect(depositsLine.debit.toString()).toBe('500.00');
-    expect(revenueLine.credit.toString()).toBe('500.00');
+    expect(depositsLine.debit.toFixed(2)).toBe('500.00');
+    expect(revenueLine.credit.toFixed(2)).toBe('500.00');
   });
 
   it('a reservation reaching COMPLETED with NO deposit posts nothing extra', async () => {
@@ -280,7 +280,7 @@ describe('Financial transaction engine — reservation deposits (paid, refunded,
   });
 });
 
-describe('Financial transaction engine — catering deposits and balance settlement', () => {
+describe('Financial transaction engine â€” catering deposits and balance settlement', () => {
   beforeEach(async () => {
     await resetDatabase();
   });
@@ -312,7 +312,7 @@ describe('Financial transaction engine — catering deposits and balance settlem
     return { user, branch, event: accepted.event! };
   }
 
-  it('a DEPOSIT payment posts Debit Cash / Credit Customer Deposits — never straight to revenue (master spec §23)', async () => {
+  it('a DEPOSIT payment posts Debit Cash / Credit Customer Deposits â€” never straight to revenue (master spec Â§23)', async () => {
     const { user, branch, event } = await acceptedEvent('h');
     // event total = 10 x 50.00 = 500.00 + 12% tax = 560.00.
     await CateringService.recordPayment(user.organizationId, branch.id, event.id, { type: 'DEPOSIT', method: 'CASH', amount: '200.00', status: 'COMPLETED' }, user.id);
@@ -324,8 +324,8 @@ describe('Financial transaction engine — catering deposits and balance settlem
     });
     const cashLine = entry.lines.find((l) => l.accountId === acc.get('Cash')!.id)!;
     const depositsLine = entry.lines.find((l) => l.accountId === acc.get('Customer Deposits')!.id)!;
-    expect(cashLine.debit.toString()).toBe('200.00');
-    expect(depositsLine.credit.toString()).toBe('200.00');
+    expect(cashLine.debit.toFixed(2)).toBe('200.00');
+    expect(depositsLine.credit.toFixed(2)).toBe('200.00');
 
     // No revenue posted yet.
     const revenueEntries = await prisma.journalEntryLine.findMany({ where: { accountId: acc.get('Catering Revenue')!.id } });
@@ -345,13 +345,13 @@ describe('Financial transaction engine — catering deposits and balance settlem
     const cashLine = balanceEntry.lines.find((l) => l.accountId === acc.get('Cash')!.id)!;
     const depositsLine = balanceEntry.lines.find((l) => l.accountId === acc.get('Customer Deposits')!.id)!;
     const revenueLine = balanceEntry.lines.find((l) => l.accountId === acc.get('Catering Revenue')!.id)!;
-    expect(cashLine.debit.toString()).toBe('360.00');
-    expect(depositsLine.debit.toString()).toBe('200.00');
+    expect(cashLine.debit.toFixed(2)).toBe('360.00');
+    expect(depositsLine.debit.toFixed(2)).toBe('200.00');
     // 200 (deposit) + 360 (balance) = 560.00, matching event.total exactly
-    // in this scenario — but the entry is built from actual payments, not
+    // in this scenario â€” but the entry is built from actual payments, not
     // event.total, per the design decision documented in AccountingService.
-    expect(revenueLine.credit.toString()).toBe('560.00');
-    expect(event.total.toString()).toBe('560.00');
+    expect(revenueLine.credit.toFixed(2)).toBe('560.00');
+    expect(event.total.toFixed(2)).toBe('560.00');
 
     const debitTotal = balanceEntry.lines.reduce((sum, l) => sum + Number(l.debit), 0);
     const creditTotal = balanceEntry.lines.reduce((sum, l) => sum + Number(l.credit), 0);
@@ -359,7 +359,7 @@ describe('Financial transaction engine — catering deposits and balance settlem
   });
 });
 
-describe('Financial transaction engine — inventory purchases and waste', () => {
+describe('Financial transaction engine â€” inventory purchases and waste', () => {
   beforeEach(async () => {
     await resetDatabase();
   });
@@ -378,9 +378,13 @@ describe('Financial transaction engine — inventory purchases and waste', () =>
       user.id,
     );
     await InventoryService.submitPurchaseOrder(user.organizationId, branch.id, po.id, user.id);
+    const poItem = po.items[0];
+    if (!poItem) {
+      throw new Error('Expected purchase order to contain an item');
+    }
     await InventoryService.receivePurchaseOrderItems(
       user.organizationId, branch.id, po.id,
-      { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '10' }] },
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '10' }] },
       user.id,
     );
 
@@ -391,8 +395,8 @@ describe('Financial transaction engine — inventory purchases and waste', () =>
     });
     const inventoryLine = entry.lines.find((l) => l.accountId === acc.get('Inventory')!.id)!;
     const apLine = entry.lines.find((l) => l.accountId === acc.get('Accounts Payable')!.id)!;
-    expect(inventoryLine.debit.toString()).toBe('1900.00'); // 10kg x 190.00
-    expect(apLine.credit.toString()).toBe('1900.00');
+    expect(inventoryLine.debit.toFixed(2)).toBe('1900.00'); // 10kg x 190.00
+    expect(apLine.credit.toFixed(2)).toBe('1900.00');
   });
 
   it('partial receiving against the same PO posts a separate journal entry each time (not blocked by idempotency)', async () => {
@@ -406,11 +410,15 @@ describe('Financial transaction engine — inventory purchases and waste', () =>
       user.id,
     );
     await InventoryService.submitPurchaseOrder(user.organizationId, branch.id, po.id, user.id);
-    await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '6' }] }, user.id);
-    await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '4' }] }, user.id);
+    const poItem = po.items[0];
+    if (!poItem) {
+      throw new Error('Expected purchase order to contain an item');
+    }
+    await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '6' }] }, user.id);
+    await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '4' }] }, user.id);
 
     const entries = await prisma.journalEntry.findMany({ where: { organizationId: user.organizationId, referenceType: 'InventoryTransaction' } });
-    expect(entries).toHaveLength(2); // one per receiving call — PO-level idempotency would have collapsed this to 1.
+    expect(entries).toHaveLength(2); // one per receiving call â€” PO-level idempotency would have collapsed this to 1.
     const financialTransactions = await prisma.financialTransaction.findMany({ where: { organizationId: user.organizationId, type: 'INVENTORY_PURCHASE' } });
     expect(financialTransactions).toHaveLength(2);
   });
@@ -429,12 +437,12 @@ describe('Financial transaction engine — inventory purchases and waste', () =>
     });
     const wasteLine = entry.lines.find((l) => l.accountId === acc.get('Waste')!.id)!;
     const inventoryLine = entry.lines.find((l) => l.accountId === acc.get('Inventory')!.id)!;
-    expect(wasteLine.debit.toString()).toBe('270.00'); // 1.5kg x 180.00
-    expect(inventoryLine.credit.toString()).toBe('270.00');
+    expect(wasteLine.debit.toFixed(2)).toBe('270.00'); // 1.5kg x 180.00
+    expect(inventoryLine.credit.toFixed(2)).toBe('270.00');
   });
 });
 
-describe('Financial transaction engine — every posted entry balances (SUM(DEBITS) = SUM(CREDITS))', () => {
+describe('Financial transaction engine â€” every posted entry balances (SUM(DEBITS) = SUM(CREDITS))', () => {
   beforeEach(async () => {
     await resetDatabase();
   });
@@ -452,7 +460,7 @@ describe('Financial transaction engine — every posted entry balances (SUM(DEBI
       { type: 'DINE_IN', tableId: table.id, discountAmount: '0.00', items: [{ menuItemId: item.id, quantity: 1, modifierIds: [] }] },
       user.id,
     );
-    await OrderService.recordPayment(user.organizationId, branch.id, order.id, { method: 'CASH', amount: order.total.toString(), status: 'COMPLETED' }, user.id);
+    await OrderService.recordPayment(user.organizationId, branch.id, order.id, { method: 'CASH', amount: order.total.toFixed(2), status: 'COMPLETED' }, user.id);
     for (const status of ['CONFIRMED', 'PREPARING', 'READY', 'COMPLETED'] as const) {
       await OrderService.updateStatus(user.organizationId, branch.id, order.id, { status }, user.id);
     }
@@ -488,7 +496,11 @@ describe('Financial transaction engine — every posted entry balances (SUM(DEBI
       user.id,
     );
     await InventoryService.submitPurchaseOrder(user.organizationId, branch.id, po.id, user.id);
-    await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '5' }] }, user.id);
+    const poItem = po.items[0];
+    if (!poItem) {
+      throw new Error('Expected purchase order to contain an item');
+    }
+    await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '5' }] }, user.id);
 
     const trialBalance = await AccountingService.generateTrialBalance(user.organizationId);
     expect(trialBalance.isBalanced).toBe(true);
@@ -496,7 +508,7 @@ describe('Financial transaction engine — every posted entry balances (SUM(DEBI
     expect(Number(trialBalance.totalDebits)).toBeGreaterThan(0);
 
     // Accounts Payable carries a real, non-zero balance from the inventory
-    // purchase above (the BANK_TRANSFER-paid expense credits Bank, not AP —
+    // purchase above (the BANK_TRANSFER-paid expense credits Bank, not AP â€”
     // see AccountingService.approveExpense). Accounts Receivable's
     // participation is exercised separately, in the partial-payment order
     // test above.
@@ -504,3 +516,4 @@ describe('Financial transaction engine — every posted entry balances (SUM(DEBI
     expect(Number(apRow.balance)).toBeGreaterThan(0);
   });
 });
+

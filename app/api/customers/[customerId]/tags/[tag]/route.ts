@@ -7,8 +7,9 @@ import { CustomerService } from '@/services/crm/CustomerService';
 
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: { customerId: string; tag: string } },
+  props: { params: Promise<{ customerId: string; tag: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
     // Phase 15 hardening: was {result} — see the sibling addresses/[id]

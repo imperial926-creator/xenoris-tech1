@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { createTableSchema } from '@/lib/validation/table';
 import { TableService } from '@/services/tables/TableService';
 
-export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.TABLE_VIEW);
     const tables = await TableService.listTables(session.organizationId, params.id);
@@ -16,7 +17,8 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
   }
 }
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.TABLE_MANAGE);
     const body = await request.json();

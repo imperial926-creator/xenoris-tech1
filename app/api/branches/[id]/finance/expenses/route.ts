@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { createExpenseSchema, listExpensesQuerySchema } from '@/lib/validation/accounting';
 import { AccountingService } from '@/services/accounting/AccountingService';
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.FINANCE_VIEW);
     const { searchParams } = new URL(request.url);
@@ -25,7 +26,8 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 }
 
 /** Created as PENDING — approveExpense (below) is the one code path that ever posts it to the ledger. */
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.FINANCE_MANAGE);
     const body = await request.json();

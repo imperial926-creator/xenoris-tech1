@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { createCateringPackageSchema } from '@/lib/validation/catering';
 import { CateringService } from '@/services/catering/CateringService';
 
-export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CATERING_MANAGE);
     const packages = await CateringService.listPackages(session.organizationId, params.id);
@@ -16,7 +17,8 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
   }
 }
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CATERING_MANAGE);
     const body = await request.json();

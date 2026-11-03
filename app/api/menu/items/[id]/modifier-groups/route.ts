@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { linkModifierGroupSchema } from '@/lib/validation/menu';
 import { MenuService } from '@/services/menu/MenuService';
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.MENU_MANAGE);
     const body = await request.json();

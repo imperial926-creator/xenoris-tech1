@@ -347,16 +347,16 @@ describe('InsightService.forecastRevenue', () => {
 
   it('projects the next bucket along an increasing trend, fully disclosed as a heuristic', async () => {
     const { user, branch, item } = await setupFixture('forecast-b');
-    // Increasing daily revenue at day -4, -2, and 0 (150, 300, 450) — the
+    // Increasing VAT-inclusive daily revenue at day -4, -2, and 0 (168, 336, 504) — the
     // two days in between are zero-filled buckets (enumerateBuckets fills
     // every day in range, not just days with orders), so the 5-bucket
-    // series is [150, 0, 300, 0, 450]. Not perfectly linear point-to-point,
+    // series is [168, 0, 336, 0, 504]. Not perfectly linear point-to-point,
     // but its overall least-squares slope is unambiguously positive, which
     // is all this test needs: the projection should continue upward, and
     // must never go negative regardless of the zero buckets pulling it down.
-    await createOrderOn(user.organizationId, branch.id, user.id, 4, { itemId: item.id, quantity: 1 }); // 150 (day -4)
-    await createOrderOn(user.organizationId, branch.id, user.id, 2, { itemId: item.id, quantity: 2 }); // 300 (day -2)
-    await createOrderOn(user.organizationId, branch.id, user.id, 0, { itemId: item.id, quantity: 3 }); // 450 (day 0, today)
+    await createOrderOn(user.organizationId, branch.id, user.id, 4, { itemId: item.id, quantity: 1 }); // 168 including VAT (day -4)
+    await createOrderOn(user.organizationId, branch.id, user.id, 2, { itemId: item.id, quantity: 2 }); // 336 including VAT (day -2)
+    await createOrderOn(user.organizationId, branch.id, user.id, 0, { itemId: item.id, quantity: 3 }); // 504 including VAT (day 0, today)
 
     const customQuery = {
       preset: 'custom' as const,
@@ -372,12 +372,12 @@ describe('InsightService.forecastRevenue', () => {
     for (const bucket of forecast.forecast) {
       expect(Number(bucket.projectedRevenue)).toBeGreaterThanOrEqual(0); // never negative, even for a declining series
     }
-    // Exact least-squares fit over [150, 0, 300, 0, 450] (x = 0..4): slope
-    // 60, intercept 60 -> x=5 projects to 360.00, x=6 to 420.00. Asserted
+    // Exact least-squares fit over [168, 0, 336, 0, 504] (x = 0..4): slope
+    // 67.2, intercept 67.2 -> x=5 projects to 403.20, x=6 to 470.40. Asserted
     // exactly (not just "> 0") since every input here is a round number
     // with no rounding error anywhere in the computation.
-    expect(forecast.forecast[0]?.projectedRevenue).toBe('360.00');
-    expect(forecast.forecast[1]?.projectedRevenue).toBe('420.00');
+    expect(forecast.forecast[0]?.projectedRevenue).toBe('403.20');
+    expect(forecast.forecast[1]?.projectedRevenue).toBe('470.40');
     expect(forecast.disclaimer.length).toBeGreaterThan(0);
     expect(forecast.dataSources.length).toBeGreaterThan(0);
   });

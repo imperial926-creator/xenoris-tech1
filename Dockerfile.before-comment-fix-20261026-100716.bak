@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage production image (master spec Â§60 "Production Deployment":
+# `App builds` is its own step in the deploy sequence). Produces a minimal
+# runtime image built on Next.js's `output: 'standalone'` (see
+# next.config.js) â€” the final stage ships only the compiled server bundle,
+# its pruned production dependency subset, and static assets, not the full
+# `node_modules`/dev toolchain used to build it.
+#
+# This has NOT been built or run in this sandbox â€” no network access here to
+# pull the base image or run `npm ci` (see CLAUDE.md â†’ Known Issues). Build
+# and smoke-test it in a real environment before deploying:
+#   docker build -t restaurant-platform .
+#   docker run --rm -p 3000:3000 --env-file .env restaurant-platform
+#
+# Database migrations are DELIBERATELY NOT run here (no `prisma migrate
+# deploy` in this file, no CMD wrapper script running it). Baking migrations
+# into container startup means every replica of a multi-instance deploy
+# races to run them concurrently. Per Â§60's sequence, migrations are a
+# distinct pre-deploy step â€” see docs/deployment/production-checklist.md â€”
+# run once, before the new image's containers start receiving traffic.
+
+# ---- deps: install once, reused by the builder stage -----------------------
+FROM node:24-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# ---- builder: generate the Prisma client and produce the standalone build --
+FROM node:24-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+# Needed at build time because Next.js statically analyzes route handlers
+# that import the generated Prisma client â€” this does not connect to a
+# database, it only writes lib/generated code from prisma/schema.prisma.
+RUN npx prisma generate
+# Build-time environment: a real DATABASE_URL/AUTH_SECRET are NOT required
+# for `next build` itself (no page in this app performs a DB call during
+# static generation â€” every data-dependent route is force-dynamic or an API
+# route), but instrumentation.ts's validateEnv() only runs when a server
+# instance actually boots (register()), not during `next build`'s compile
+# step, so this stage does not need real secrets either. Real values are
+# supplied at `docker run` / orchestrator deploy time instead (Â§60:
+# "Environment variables" is a distinct step from "Application deployment").
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# ---- runner: minimal production image --------------------------------------
+FROM node:24-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Run as a non-root user (standard Next.js standalone-output recommendation)
+# rather than the default root â€” least-privilege inside the container.
+RUN addgroup --system --gid 1001 nodejs \
+  && adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+# `output: 'standalone'` (next.config.js) produces .next/standalone with
+# server.js and only the production deps that route actually needs, and
+# .next/static with the built client assets â€” both copied with owner set
+# directly to the non-root runtime user rather than a separate chown pass.
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+
+USER nextjs
+
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# Polls the unauthenticated liveness endpoint (app/api/health/route.ts),
+# which itself round-trips the database â€” a container reporting "healthy"
+# means both the Node process AND its DB connection are good, matching
+# Â§63's "API monitoring" + "Database monitoring" in one check.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -O- http://127.0.0.1:3000/api/health || exit 1
+
+CMD ["node", "server.js"]

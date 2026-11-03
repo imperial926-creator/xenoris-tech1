@@ -8,8 +8,9 @@ import { InvoiceService } from '@/services/invoicing/InvoiceService';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; invoiceId: string } },
+  props: { params: Promise<{ id: string; invoiceId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.ORDER_MANAGE);
     const body = await request.json();

@@ -8,8 +8,9 @@ import { DriverService } from '@/services/delivery/DriverService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; driverId: string } },
+  props: { params: Promise<{ id: string; driverId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const driver = await DriverService.get(session.organizationId, params.id, params.driverId);
@@ -21,8 +22,9 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string; driverId: string } },
+  props: { params: Promise<{ id: string; driverId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const body = await request.json();

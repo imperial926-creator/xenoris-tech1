@@ -8,8 +8,9 @@ import { DeliveryZoneService } from '@/services/delivery/DeliveryZoneService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; zoneId: string } },
+  props: { params: Promise<{ id: string; zoneId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const zone = await DeliveryZoneService.get(session.organizationId, params.id, params.zoneId);
@@ -21,8 +22,9 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string; zoneId: string } },
+  props: { params: Promise<{ id: string; zoneId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const body = await request.json();

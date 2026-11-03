@@ -8,7 +8,7 @@
  * extend this further (reservations, orders, inventory, ...) as those
  * tables are introduced.
  */
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type AccountType, type DebitCredit, type CashFlowCategory } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import {
   DEFAULT_ROLE_PERMISSIONS,
@@ -121,33 +121,53 @@ async function main() {
     });
     const role = roleRecords.find((r) => r.name === roleName)!;
     const branchScope = roleName === 'MANAGER' ? branchA.id : null;
-    await prisma.userRole.upsert({
-      where: {
-        userId_roleId_branchId: { userId: user.id, roleId: role.id, branchId: branchScope },
-      },
-      update: {},
-      create: {
-        userId: user.id,
-        roleId: role.id,
-        organizationId: organization.id,
-        branchId: branchScope,
-      },
-    });
+
+const existingUserRole = await prisma.userRole.findFirst({
+  where: {
+    userId: user.id,
+    roleId: role.id,
+    branchId: branchScope,
+  },
+});
+
+if (!existingUserRole) {
+  await prisma.userRole.create({
+    data: {
+      userId: user.id,
+      roleId: role.id,
+      organizationId: organization.id,
+      branchId: branchScope,
+    },
+  });
+}
     console.log(`  seeded ${roleName} -> ${email}`);
   }
 
   // --- Phase 2: table sections + tables, per branch ------------------------
   for (const branch of [branchA, branchB]) {
     const sections = await Promise.all(
-      ['Main Dining', 'Patio'].map((name) =>
-        prisma.tableSection.upsert({
-          where: { branchId_name: { branchId: branch.id, name } },
-          update: {},
-          create: { organizationId: organization.id, branchId: branch.id, name },
-        }),
-      ),
-    );
+  ['Main Dining', 'Patio'].map(async (name) => {
+    const existing = await prisma.tableSection.findFirst({
+      where: {
+        branchId: branch.id,
+        name,
+        active: true,
+      },
+    });
 
+    if (existing) {
+      return existing;
+    }
+
+    return prisma.tableSection.create({
+      data: {
+        organizationId: organization.id,
+        branchId: branch.id,
+        name,
+      },
+    });
+  }),
+);
     // 6 tables per section = 12 per branch = 24 total across both branches.
     for (const section of sections) {
       for (let i = 1; i <= 6; i++) {
@@ -184,14 +204,28 @@ async function main() {
     { name: '[DEMO] Desserts', order: 4 },
   ];
   const categories = await Promise.all(
-    categoryDefs.map((c) =>
-      prisma.menuCategory.upsert({
-        where: { organizationId_name: { organizationId: organization.id, name: c.name } },
-        update: {},
-        create: { organizationId: organization.id, name: c.name, displayOrder: c.order },
-      }),
-    ),
-  );
+  categoryDefs.map(async (c) => {
+    const existing = await prisma.menuCategory.findFirst({
+      where: {
+        organizationId: organization.id,
+        name: c.name,
+        active: true,
+      },
+    });
+
+    if (existing) {
+      return existing;
+    }
+
+    return prisma.menuCategory.create({
+      data: {
+        organizationId: organization.id,
+        name: c.name,
+        displayOrder: c.order,
+      },
+    });
+  }),
+);
   const categoryByName = new Map<string, (typeof categories)[number]>();
   for (const c of categories) categoryByName.set(c.name, c);
 
@@ -787,32 +821,76 @@ async function main() {
   }
   console.log(`  seeded ${orderCount} orders across DINE_IN/TAKEOUT/DELIVERY and every status, ${invoiceCount} invoice(s)`);
 
-  // --- Phase 6: delivery zones, a driver profile, one dispatched delivery --
-  // Two zones per branch so the Delivery board has real data to manage, a
-  // Driver profile for the already-seeded DRIVER-role demo user (created in
-  // the per-role loop above), and — the meaningful part — retrofitting the
-  // Phase 4 "delivery-preparing" seed order with a real zone/fee so it
-  // demonstrates the actual point of Phase 6: the fee flows into the
-  // order's total, not just decoration on a delivery record.
+  // --- Phase 6: delivery zones, a driver profile, one dispatched delivery ---
+  // Seed delivery zones and a driver profile, then attach a real delivery fee
+  // to the Phase 4 delivery-preparing order.
+
   const zoneDefs: Array<{ branchId: string; name: string; deliveryFee: string }> = [
     { branchId: branchA.id, name: '[DEMO] Downtown', deliveryFee: '50.00' },
     { branchId: branchA.id, name: '[DEMO] North District', deliveryFee: '80.00' },
     { branchId: branchB.id, name: '[DEMO] City Center', deliveryFee: '60.00' },
   ];
+
   const zoneByName = new Map<string, { id: string; deliveryFee: string }>();
+
   for (const def of zoneDefs) {
-    const zone = await prisma.deliveryZone.upsert({
-      where: { branchId_name: { branchId: def.branchId, name: def.name } },
-      update: {},
-      create: { organizationId: organization.id, branchId: def.branchId, name: def.name, deliveryFee: def.deliveryFee },
+    const existing = await prisma.deliveryZone.findFirst({
+      where: {
+        branchId: def.branchId,
+        name: def.name,
+        active: true,
+      },
     });
-    zoneByName.set(def.name, { id: zone.id, deliveryFee: def.deliveryFee });
+
+    const zone = existing
+      ? await prisma.deliveryZone.update({
+          where: { id: existing.id },
+          data: { deliveryFee: def.deliveryFee },
+        })
+      : await prisma.deliveryZone.create({
+          data: {
+            organizationId: organization.id,
+            branchId: def.branchId,
+            name: def.name,
+            deliveryFee: def.deliveryFee,
+          },
+        });
+
+    zoneByName.set(def.name, {
+      id: zone.id,
+      deliveryFee: def.deliveryFee,
+    });
   }
+
   console.log(`  seeded ${zoneDefs.length} delivery zones`);
 
-  const driverUser = await prisma.user.findFirstOrThrow({
-    where: { organizationId: organization.id, email: 'driver@restaurant-platform.local' },
+  const downtownZone = zoneByName.get('[DEMO] Downtown')!;
+
+  const deliveryOrder = await prisma.order.findUniqueOrThrow({
+    where: { id: `${organization.id}-order-delivery-preparing` },
   });
+
+  // Backfill the fee into the order total only when the fee is still zero.
+  // This keeps repeated seed runs from adding the same fee multiple times.
+  const deliveryFeeAmount = Number(downtownZone.deliveryFee);
+
+  if (Number(deliveryOrder.deliveryFee) === 0) {
+    await prisma.order.update({
+      where: { id: deliveryOrder.id },
+      data: {
+        deliveryFee: downtownZone.deliveryFee,
+        total: (Number(deliveryOrder.total) + deliveryFeeAmount).toFixed(2),
+      },
+    });
+  }
+
+  const driverUser = await prisma.user.findFirstOrThrow({
+    where: {
+      organizationId: organization.id,
+      email: 'driver@restaurant-platform.local',
+    },
+  });
+
   const driver = await prisma.driver.upsert({
     where: { userId: driverUser.id },
     update: {},
@@ -824,42 +902,25 @@ async function main() {
       vehiclePlate: '[DEMO] ABC-1234',
     },
   });
+
   console.log(`  seeded 1 driver profile -> ${driverUser.email}`);
 
-  const downtownZone = zoneByName.get('[DEMO] Downtown')!;
-  const deliveryOrder = await prisma.order.findUniqueOrThrow({
-    where: { id: `${organization.id}-order-delivery-preparing` },
-  });
-  // Backfill the fee into the order's own total — see schema.prisma's Phase
-  // 6 comment for why deliveryFee lives on Order at all. Guarded on
-  // deliveryFee still being unset so `prisma db seed` stays idempotent —
-  // without this check, re-running the seed would add the fee again on
-  // every run instead of upserting to a fixed value.
-  const deliveryFeeAmount = Number(downtownZone.deliveryFee);
-  if (Number(deliveryOrder.deliveryFee) === 0) {
-    await prisma.order.update({
-      where: { id: deliveryOrder.id },
-      data: {
-        deliveryFee: downtownZone.deliveryFee,
-        total: (Number(deliveryOrder.total) + deliveryFeeAmount).toFixed(2),
-      },
-    });
-  }
-
+  // A delivery order is a separate record linked to the existing Order.
+  // The unique orderId makes this safe to rerun without duplicating the record.
   const deliveryOrderRecord = await prisma.deliveryOrder.upsert({
     where: { orderId: deliveryOrder.id },
     update: {},
     create: {
-      id: `${organization.id}-delivery-order-delivery-preparing`,
       organizationId: organization.id,
       branchId: branchA.id,
       orderId: deliveryOrder.id,
       deliveryZoneId: downtownZone.id,
-      deliveryFee: downtownZone.deliveryFee,
       driverId: driver.id,
       status: 'ASSIGNED',
+      deliveryFee: downtownZone.deliveryFee,
     },
   });
+
   const deliveryHistoryExists = await prisma.deliveryStatusHistory.findFirst({
     where: { deliveryOrderId: deliveryOrderRecord.id },
   });
@@ -897,10 +958,19 @@ async function main() {
   ];
   const cateringPackageByName = new Map<string, { id: string; pricePerGuest: string }>();
   for (const def of cateringPackageDefs) {
-    const pkg = await prisma.cateringPackage.upsert({
-      where: { branchId_name: { branchId: def.branchId, name: def.name } },
-      update: {},
-      create: { organizationId: organization.id, branchId: def.branchId, name: def.name, pricePerGuest: def.pricePerGuest },
+    // The active-only unique index is defined in SQL, not Prisma's schema.
+    // Find the active package first so Prisma does not need a nonexistent
+    // branchId_name unique selector.
+    const existingPkg = await prisma.cateringPackage.findFirst({
+      where: { branchId: def.branchId, name: def.name, active: true },
+    });
+    const pkg = existingPkg ?? await prisma.cateringPackage.create({
+      data: {
+        organizationId: organization.id,
+        branchId: def.branchId,
+        name: def.name,
+        pricePerGuest: def.pricePerGuest,
+      },
     });
     cateringPackageByName.set(def.name, { id: pkg.id, pricePerGuest: def.pricePerGuest });
   }
@@ -1436,12 +1506,15 @@ async function main() {
   // A supplier and one fully-received purchase order for Chicken — proves
   // the PURCHASE transaction type and the "last purchase cost wins" cost
   // update, per InventoryService.receivePurchaseOrderItems.
-  const supplier = await prisma.supplier.upsert({
-    where: { organizationId_name: { organizationId: organization.id, name: '[DEMO] Manila Fresh Poultry & Produce' } },
-    update: {},
-    create: {
+  // The active-only unique index is defined in SQL, not Prisma's schema.
+  const supplierName = '[DEMO] Manila Fresh Poultry & Produce';
+  const existingSupplier = await prisma.supplier.findFirst({
+    where: { organizationId: organization.id, name: supplierName, active: true },
+  });
+  const supplier = existingSupplier ?? await prisma.supplier.create({
+    data: {
       organizationId: organization.id,
-      name: '[DEMO] Manila Fresh Poultry & Produce',
+      name: supplierName,
       contactName: 'Rico Santos',
       email: 'orders@manilafresh.example',
       phone: '+63 917 800 4000',
@@ -1608,7 +1681,7 @@ async function main() {
   // Phase 11 — isCashEquivalent/cashFlowCategory mirrored from
   // AccountingService.ts's DEFAULT_CHART_OF_ACCOUNTS too (see
   // ReportingService.generateCashFlow for what these drive).
-  const CHART_OF_ACCOUNTS: Array<{ code: string; name: string; type: string; normalBalance: string; isCashEquivalent?: boolean; cashFlowCategory?: string }> = [
+  const CHART_OF_ACCOUNTS: Array<{ code: string; name: string; type: AccountType; normalBalance: DebitCredit; isCashEquivalent?: boolean; cashFlowCategory?: CashFlowCategory }> = [
     { code: '1000', name: 'Cash', type: 'ASSET', normalBalance: 'DEBIT', isCashEquivalent: true },
     { code: '1010', name: 'Bank', type: 'ASSET', normalBalance: 'DEBIT', isCashEquivalent: true },
     { code: '1100', name: 'Accounts Receivable', type: 'ASSET', normalBalance: 'DEBIT', cashFlowCategory: 'OPERATING' },

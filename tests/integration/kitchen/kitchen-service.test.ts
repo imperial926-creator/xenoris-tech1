@@ -82,7 +82,12 @@ describe('KitchenService', () => {
 
     // Oldest first: createdAt must be non-decreasing across the returned list.
     for (let i = 1; i < queue.length; i += 1) {
-      expect(queue[i].createdAt.getTime()).toBeGreaterThanOrEqual(queue[i - 1].createdAt.getTime());
+      const currentOrder = queue[i];
+      const previousOrder = queue[i - 1];
+      if (!currentOrder || !previousOrder) {
+        throw new Error('Expected consecutive orders in the kitchen queue');
+      }
+      expect(currentOrder.createdAt.getTime()).toBeGreaterThanOrEqual(previousOrder.createdAt.getTime());
     }
   });
 

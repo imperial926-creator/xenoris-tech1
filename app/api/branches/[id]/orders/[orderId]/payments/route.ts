@@ -8,8 +8,9 @@ import { OrderService } from '@/services/orders/OrderService';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; orderId: string } },
+  props: { params: Promise<{ id: string; orderId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.ORDER_MANAGE);
     const body = await request.json();

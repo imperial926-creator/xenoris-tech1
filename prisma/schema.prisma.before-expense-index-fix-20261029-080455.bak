@@ -1,0 +1,2633 @@
+// ---------------------------------------------------------------------------
+// Restaurant Platform — Prisma Schema
+// Phase 1 (Foundation) scope only: organizations, branches, users, RBAC, audit log.
+// See docs/database.md for conventions and the forward-looking schema for later phases.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  legalName String?
+  email     String   @unique
+  phone     String?
+  currency  String   @default("PHP")
+  timezone  String   @default("Asia/Manila")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches  Branch[]
+  users     User[]
+  roles     Role[]
+  userRoles UserRole[]
+  auditLogs AuditLog[]
+  menuCategories     MenuCategory[]
+  menuItems          MenuItem[]
+  menuModifierGroups MenuModifierGroup[]
+  reservations       Reservation[]
+  orders             Order[]
+  invoices           Invoice[]
+  deliveryZones      DeliveryZone[]
+  drivers            Driver[]
+  deliveryOrders     DeliveryOrder[]
+  cateringPackages   CateringPackage[]
+  cateringInquiries  CateringInquiry[]
+  cateringQuotes     CateringQuote[]
+  cateringEvents     CateringEvent[]
+  cateringPayments   CateringPayment[]
+  customers          Customer[]
+  customerReviews    CustomerReview[]
+  units               Unit[]
+  ingredients         Ingredient[]
+  recipes             Recipe[]
+  inventoryItems      InventoryItem[]
+  inventoryTransactions InventoryTransaction[]
+  suppliers           Supplier[]
+  purchaseOrders      PurchaseOrder[]
+  stockCounts         StockCount[]
+  wasteRecords        WasteRecord[]
+  chartOfAccounts       ChartOfAccount[]
+  accountingPeriods     AccountingPeriod[]
+  journalEntries        JournalEntry[]
+  financialTransactions FinancialTransaction[]
+  expenseCategories     ExpenseCategory[]
+  vendors               Vendor[]
+  expenses              Expense[]
+  notifications         Notification[]
+
+  // Phase 8 — CRM. Per-organization overrides for the RFM segmentation
+  // thresholds in lib/crm/rfm.ts (recency/frequency/monetary cutoffs).
+  // Nullable: null means "use DEFAULT_RFM_THRESHOLDS", the same
+  // "JSON column, code supplies the default" pattern as Branch.openingHours.
+  // Master spec §32 says "make thresholds configurable" without specifying
+  // a settings UI/table shape — this is the smallest additive way to honor
+  // that per-organization, without a new table for a handful of numbers.
+  crmSettings Json?
+
+  // Phase 13 — AI. Per-organization overrides for the insight-generation
+  // thresholds in lib/ai/thresholds.ts (how big a swing in sales/margin/
+  // expense/waste/repeat-rate counts as worth surfacing). Same "nullable
+  // JSON column, code supplies the default" pattern as crmSettings directly
+  // above — master spec's own "All rules must be configurable" line (§37,
+  // the section immediately preceding AI Business Intelligence) applies to
+  // these rules exactly as it did to RFM's.
+  aiSettings Json?
+
+  @@map("organizations")
+}
+
+enum BranchStatus {
+  ACTIVE
+  INACTIVE
+  TEMPORARILY_CLOSED
+}
+
+// Phase 15 hardening (database review): the financial/historical child
+// models below (Invoice, InventoryTransaction, PurchaseOrder, WasteRecord,
+// CateringPayment, JournalEntry, FinancialTransaction, Expense) all use
+// onDelete: Restrict on their `branch` relation, not Cascade — deleting a
+// branch must never silently delete or orphan a ledger/audit trail record.
+// A branch with financial history has to be deactivated (BranchStatus),
+// not hard-deleted, which this now enforces at the DB level rather than
+// only by convention. See migration 20260818040000_phase15_db_financial_hardening.
+model Branch {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  address        String?
+  phone          String?
+  email          String?
+  timezone       String       @default("Asia/Manila")
+  openingHours   Json?
+  status         BranchStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userRoles    UserRole[]
+  auditLogs    AuditLog[]
+  tableSections TableSection[]
+  tables        RestaurantTable[]
+  reservations  Reservation[]
+  orders        Order[]
+  invoices      Invoice[]
+  invoiceSequence InvoiceSequence?
+  deliveryZones DeliveryZone[]
+  drivers       Driver[]
+  deliveryOrders DeliveryOrder[]
+  cateringPackages  CateringPackage[]
+  cateringInquiries CateringInquiry[]
+  cateringQuotes    CateringQuote[]
+  cateringEvents    CateringEvent[]
+  cateringPayments  CateringPayment[]
+  customerReviews   CustomerReview[]
+  inventoryItems        InventoryItem[]
+  inventoryTransactions InventoryTransaction[]
+  purchaseOrders        PurchaseOrder[]
+  stockCounts           StockCount[]
+  wasteRecords          WasteRecord[]
+  journalEntries        JournalEntry[]
+  financialTransactions FinancialTransaction[]
+  expenses              Expense[]
+  notifications         Notification[]
+
+  @@index([organizationId])
+  @@map("branches")
+}
+
+// ---------------------------------------------------------------------------
+// Users & RBAC
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  DEACTIVATED
+}
+
+model User {
+  id             String     @id @default(cuid())
+  organizationId String
+  email          String
+  passwordHash   String
+  firstName      String
+  lastName       String
+  phone          String?
+  status         UserStatus @default(ACTIVE)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userRoles    UserRole[]
+  auditLogs    AuditLog[]
+  // Reservations made under this user's account. Optional on the Reservation
+  // side — walk-in/phone bookings have no registered user at all (Phase 8
+  // full CRM identity is a later phase; this is just "was there an account").
+  reservations Reservation[]
+  orders       Order[]
+  // A Driver profile exists only for users actually dispatched for delivery
+  // (typically, but not necessarily only, those with the DRIVER role) — see
+  // the "Phase 6 — Delivery" comment block near the Driver model.
+  driverProfile Driver?
+  // Catering inquiries/events made under this user's account — optional,
+  // same "was there an account" pattern as Reservation/Order's
+  // customerUserId (Phase 7).
+  cateringInquiries CateringInquiry[]
+  cateringEvents    CateringEvent[]
+
+  // Phase 8 — CRM. The real customer identity/profile record, if this user
+  // has one — see the "Phase 8 — CRM" comment block near the Customer model
+  // for why this is a separate table from User rather than fields bolted on
+  // here (most customers never register an account at all).
+  customerProfile         Customer?
+  customerNotesAuthored   CustomerNote[]
+  customerTagsCreated     CustomerTag[]
+  customerReviewsRecorded CustomerReview[]
+
+  // Phase 9 — Inventory. Optional "who recorded/actioned this" links —
+  // same SetNull-on-delete pattern as every other staff-attribution field
+  // in this schema (CustomerNote.authorUserId, CateringPayment.recordedByUserId).
+  inventoryTransactionsRecorded InventoryTransaction[]
+  purchaseOrdersCreated         PurchaseOrder[]
+  stockCountsRecorded           StockCount[]
+  wasteRecordsRecorded          WasteRecord[]
+
+  // Phase 10 — Accounting. Same "who actioned this" attribution pattern —
+  // journal entry creation and posting are tracked as separate actors/
+  // moments (a drafted manual entry may be posted later, by someone else),
+  // per master spec §45's "create" vs. "post" being distinct responsibilities.
+  accountingPeriodsClosed    AccountingPeriod[]
+  journalEntriesCreated      JournalEntry[]       @relation("JournalEntryCreatedBy")
+  journalEntriesPosted       JournalEntry[]       @relation("JournalEntryPostedBy")
+  expensesRecorded           Expense[]            @relation("ExpenseRecordedBy")
+  expensesApproved           Expense[]            @relation("ExpenseApprovedBy")
+  expenseAttachmentsUploaded ExpenseAttachment[]
+
+  // Email is unique per organization, not globally — the same person may be a
+  // customer of multiple independent restaurant organizations on the platform.
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@map("users")
+}
+
+// Global catalog of role names used by seed data & UI. Organizations may define
+// additional custom roles later; these are the seven the spec mandates.
+enum RoleName {
+  CUSTOMER
+  STAFF
+  MANAGER
+  ACCOUNTANT
+  DRIVER
+  OWNER
+  ADMINISTRATOR
+}
+
+model Role {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           RoleName
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("roles")
+}
+
+// Platform-wide catalog of grantable permissions. Format: "<domain>:<action>",
+// e.g. "org:manage", "branch:manage", "user:manage", "reservation:manage".
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  description String
+  createdAt   DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(cuid())
+  roleId       String
+  permissionId String
+  createdAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id             String   @id @default(cuid())
+  userId         String
+  roleId         String
+  organizationId String
+  // Optional: a role assignment can be scoped to a single branch (e.g. a manager
+  // at exactly one branch). Null means org-wide for that role.
+  branchId       String?
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  // Note: because branchId is nullable, Postgres treats each NULL as distinct
+  // for uniqueness purposes — this constraint does NOT prevent granting the
+  // same org-wide (branchId = null) role to a user twice via a race
+  // condition. AuthService/seed avoid this by construction (one create per
+  // role per user). Revisit with a partial unique index if that becomes a
+  // real risk once open staff-invite flows exist (Phase 2+).
+  @@unique([userId, roleId, branchId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// Audit Log
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String?
+  userId         String?
+  action         String
+  entityType     String
+  entityId       String
+  previousValue  Json?
+  newValue       Json?
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Restaurant Configuration: Tables
+// ---------------------------------------------------------------------------
+
+model TableSection {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  name           String
+  description    String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  branch Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  tables RestaurantTable[]
+
+  // Phase 15 hardening: was a plain @@unique([branchId, name]), which
+  // permanently blocks reusing a section name after deactivation (active =
+  // false) — the same "partial unique index, no representation in Prisma's
+  // schema DSL" gap documented in the Order model's header comment (§5) for
+  // invoices_one_active_per_order. Hand-written directly into the migration
+  // SQL instead: CREATE UNIQUE INDEX table_sections_branchId_name_active_key
+  // ON table_sections ("branchId", "name") WHERE (active);
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("table_sections")
+}
+
+enum TableStatus {
+  AVAILABLE
+  RESERVED
+  OCCUPIED
+  WAITING
+  CLEANING
+  OUT_OF_SERVICE
+}
+
+model RestaurantTable {
+  id             String      @id @default(cuid())
+  organizationId String
+  branchId       String
+  sectionId      String?
+  tableNumber    String
+  capacity       Int
+  status         TableStatus @default(AVAILABLE)
+  active         Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  branch        Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  section       TableSection?        @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  statusHistory TableStatusHistory[]
+  reservationTables ReservationTable[]
+  orders        Order[]
+
+  // Table numbers only need to be unique within a branch, not globally —
+  // two branches can both have a "Table 1".
+  @@unique([branchId, tableNumber])
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("restaurant_tables")
+}
+
+model TableStatusHistory {
+  id            String      @id @default(cuid())
+  tableId       String
+  fromStatus    TableStatus?
+  toStatus      TableStatus
+  changedByUserId String?
+  note          String?
+  createdAt     DateTime    @default(now())
+
+  table RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@index([tableId, createdAt])
+  @@map("table_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Restaurant Configuration: Menu
+// ---------------------------------------------------------------------------
+
+model MenuCategory {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  displayOrder   Int      @default(0)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  items        MenuItem[]
+
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment above for the full
+  // rationale. CREATE UNIQUE INDEX menu_categories_organizationId_name_active_key
+  // ON menu_categories ("organizationId", "name") WHERE (active);
+  @@index([organizationId])
+  @@map("menu_categories")
+}
+
+// Not in the master spec's literal table list but required to express real
+// "choose one" (e.g. Size) vs "choose any" (e.g. Add-ons) modifier semantics
+// that Phase 4 order-taking needs — a flat, ungrouped modifier list can't
+// represent that distinction. See docs/database.md for the note.
+model MenuModifierGroup {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  // SINGLE = radio-button choice (e.g. "Size"), MULTIPLE = checkbox choices
+  // (e.g. "Add-ons").
+  selectionType  ModifierSelectionType @default(SINGLE)
+  required       Boolean  @default(false)
+  minSelect      Int      @default(0)
+  maxSelect      Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  modifiers    MenuModifier[]
+  itemLinks    MenuItemModifierGroup[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("menu_modifier_groups")
+}
+
+enum ModifierSelectionType {
+  SINGLE
+  MULTIPLE
+}
+
+model MenuModifier {
+  id              String   @id @default(cuid())
+  modifierGroupId String
+  name            String
+  // Additive price change when this modifier is selected — never negative
+  // discounting hidden in a modifier; discounts are a separate, explicit
+  // concept (Phase 4).
+  priceDelta      Decimal  @default(0) @db.Decimal(10, 2)
+  active          Boolean  @default(true)
+  displayOrder    Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  modifierGroup MenuModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  orderItemModifiers OrderItemModifier[]
+
+  @@unique([modifierGroupId, name])
+  @@index([modifierGroupId])
+  @@map("menu_modifiers")
+}
+
+model MenuItem {
+  id              String   @id @default(cuid())
+  organizationId String
+  categoryId      String
+  name            String
+  description     String?
+  price           Decimal  @db.Decimal(10, 2)
+  cost            Decimal? @db.Decimal(10, 2)
+  preparationTimeMinutes Int?
+  available       Boolean  @default(true)
+  imageUrl        String?
+  // Kept intentionally simple (a string, not a hard-coded tax engine) —
+  // real VAT/zero-rated/exempt treatment must be confirmed by a PH tax
+  // professional before this drives real invoicing math. See CLAUDE.md.
+  taxCategory     String   @default("STANDARD")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     MenuCategory            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  variants     MenuItemVariant[]
+  modifierGroups MenuItemModifierGroup[]
+  orderItems   OrderItem[]
+  // Phase 9 — Inventory. At most one Recipe per menu item (a recipe
+  // describes how to make this specific item, not its variants — see the
+  // "Phase 9 — Inventory" comment block for why variant-level recipes are
+  // out of scope this phase).
+  recipe       Recipe?
+
+  @@index([organizationId])
+  @@index([categoryId])
+  @@map("menu_items")
+}
+
+model MenuItemVariant {
+  id         String   @id @default(cuid())
+  menuItemId String
+  name       String
+  price      Decimal  @db.Decimal(10, 2)
+  cost       Decimal? @db.Decimal(10, 2)
+  active     Boolean  @default(true)
+  displayOrder Int    @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  @@unique([menuItemId, name])
+  @@index([menuItemId])
+  @@map("menu_item_variants")
+}
+
+model MenuItemModifierGroup {
+  id              String   @id @default(cuid())
+  menuItemId      String
+  modifierGroupId String
+  createdAt       DateTime @default(now())
+
+  menuItem      MenuItem          @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  modifierGroup MenuModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([menuItemId, modifierGroupId])
+  @@index([menuItemId])
+  @@map("menu_item_modifier_groups")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Reservations
+// ---------------------------------------------------------------------------
+//
+// Deviations from the spec's literal table list (documented, not silent):
+//
+// 1. No separate `reservation_guests` table. Guest contact info is stored
+//    directly on `Reservation` (guestName/guestEmail/guestPhone) as a
+//    snapshot at booking time, alongside an optional `customerUserId` for
+//    registered accounts. A full CRM guest/customer profile (history,
+//    preferences, tags, RFM segmentation) is Phase 8 — building a real
+//    `customers` table now, before CRM exists to populate/use it, would mean
+//    either leaving it empty or half-implementing Phase 8 early. The
+//    snapshot fields are enough for staff to run service today; Phase 8 can
+//    backfill a `Customer` link onto `Reservation` without a breaking change.
+// 2. No separate `reservation_payments` table. `depositRequired`,
+//    `depositAmount`, `depositStatus`, and `depositNote` live directly on
+//    `Reservation`. Deposits in this phase are recorded manually by staff
+//    (e.g. "cash received, ₱500, confirmed by phone") — there is no payment
+//    gateway integration yet (see docs/architecture.md § Risks). A real
+//    `payments`/`payment_transactions` ledger arrives with Phase 4
+//    (order payments) and Phase 10 (accounting); wiring reservation deposits
+//    into it happens then, not with a placeholder table now.
+//
+// Double-booking prevention: enforced by Postgres itself, not just
+// application logic. `ReservationTable` denormalizes `startAt`/`endAt`/
+// `status` from the parent `Reservation` (kept in sync by
+// `ReservationService` inside the same transaction) specifically so a
+// Postgres `EXCLUDE` constraint can reject overlapping bookings of the same
+// table at the database level. Prisma's schema DSL has no first-class
+// support for EXCLUDE constraints, so it is NOT expressed here — it is
+// hand-written directly into the migration SQL
+// (prisma/migrations/*_phase3_reservations/migration.sql):
+//
+//   CREATE EXTENSION IF NOT EXISTS btree_gist;
+//   ALTER TABLE reservation_tables ADD CONSTRAINT no_double_booking
+//     EXCLUDE USING gist ("tableId" WITH =, tsrange("startAt", "endAt") WITH &&)
+//     WHERE (status NOT IN ('CANCELLED', 'NO_SHOW'));
+//
+// This means `prisma db pull` would not perfectly round-trip this table —
+// documented here and in docs/database.md so it isn't mistaken for drift.
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  SEATED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum ReservationDepositStatus {
+  NONE
+  PENDING
+  PAID
+  REFUNDED
+}
+
+model Reservation {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  // Optional: set when the reservation belongs to a registered account.
+  // Always null for walk-in/phone bookings taken by staff.
+  customerUserId String?
+
+  // Contact snapshot at time of booking — always present, independent of
+  // customerUserId, so staff never need a join to see who they're serving.
+  guestName  String
+  guestEmail String?
+  guestPhone String?
+  // Phase 8 — CRM. Optional link to the real Customer/CRM profile — see the
+  // matching comment on Order.customerId.
+  customerId String?
+
+  startAt DateTime
+  endAt   DateTime
+  // Denormalized from startAt/endAt purely so party-size and time-window
+  // queries can filter without a computed column; kept in sync by
+  // ReservationService, never written independently.
+  guestCount Int
+
+  status            ReservationStatus @default(PENDING)
+  specialRequests   String?
+  occasion          String?
+
+  // Deposits are manually recorded by staff in this phase — see file header.
+  depositRequired Boolean                   @default(false)
+  depositAmount   Decimal?                  @db.Decimal(10, 2)
+  depositStatus   ReservationDepositStatus  @default(NONE)
+  depositNote     String?
+
+  cancellationReason String?
+  cancelledAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch               @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     User?                @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  tables       ReservationTable[]
+  statusHistory ReservationStatusHistory[]
+  reviews       CustomerReview[]
+  orders       Order[]
+
+  @@index([organizationId])
+  @@index([branchId, startAt])
+  @@index([customerUserId])
+  @@map("reservations")
+}
+
+// Join table between Reservation and RestaurantTable. startAt/endAt/status
+// are denormalized copies of the parent Reservation's fields (see file
+// header) — required for the DB-level EXCLUDE constraint that prevents
+// double-booking. ReservationService writes both the parent and this table
+// in the same transaction, so they cannot drift.
+model ReservationTable {
+  id            String            @id @default(cuid())
+  reservationId String
+  tableId       String
+  startAt       DateTime
+  endAt         DateTime
+  status        ReservationStatus
+  createdAt     DateTime          @default(now())
+
+  reservation Reservation     @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  table       RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  // Application-level guard (fast, in-process rejection of an obvious
+  // duplicate link); the real double-booking guard is the DB EXCLUDE
+  // constraint added in migration SQL, which also covers overlapping (not
+  // just identical) time ranges.
+  @@unique([reservationId, tableId])
+  @@index([tableId])
+  @@index([reservationId])
+  @@map("reservation_tables")
+}
+
+model ReservationStatusHistory {
+  id              String            @id @default(cuid())
+  reservationId   String
+  fromStatus      ReservationStatus?
+  toStatus        ReservationStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime          @default(now())
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([reservationId, createdAt])
+  @@map("reservation_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Orders, Payments, Invoicing
+// ---------------------------------------------------------------------------
+//
+// Deviations / notable decisions (documented, not silent):
+//
+// 1. Order items and modifiers SNAPSHOT their name/price at order time
+//    (nameSnapshot, unitPriceSnapshot, priceDeltaSnapshot) rather than
+//    living FKs into current menu state. Editing a menu item's price next
+//    week must never rewrite what a customer was actually charged last
+//    month — same immutability principle the accounting phase (10) will
+//    depend on. The FK to the menu row is kept alongside the snapshot
+//    purely for traceability ("which item was this"), with onDelete:
+//    Restrict so a historical order can never be left dangling.
+// 2. No separate `customers` table here either — same reasoning as
+//    Reservation (see that model's header comment). Order carries an
+//    optional `customerUserId` plus a guest contact snapshot.
+// 3. No real payment gateway. `OrderPayment` is staff-recorded ("cash
+//    received", "paid via GCash") — see `lib/payments/PaymentProvider.ts`
+//    for the (currently unimplemented) seam a real provider will plug into.
+// 4. Invoice numbering is sequential PER BRANCH (`InvoiceSequence`,
+//    incremented atomically via upsert inside the same transaction that
+//    creates the Invoice), matching how PH BIR-registered receipt series
+//    are typically issued per point-of-sale. This is NOT yet
+//    BIR-accredited official-receipt numbering — flagged in
+//    docs/architecture.md § Risks for accountant sign-off before going live.
+// 5. `invoices` has a partial unique index — "at most one non-VOID invoice
+//    per order" — that has NO representation in Prisma's schema DSL
+//    (partial/filtered unique indexes aren't expressible here, the same gap
+//    as Phase 3's EXCLUDE constraint). It is hand-written directly into the
+//    migration SQL (prisma/migrations/*_phase4_orders/migration.sql):
+//
+//      CREATE UNIQUE INDEX invoices_one_active_per_order
+//        ON invoices ("orderId") WHERE (status != 'VOID');
+//
+//    `InvoiceService` also checks this in application code first (for a
+//    clear error message), but the index is the real guarantee under a
+//    race — verified with a concurrent test the same way Phase 3's
+//    double-booking constraint was, just for "assign the next number
+//    safely" instead of "reject an overlapping range."
+//
+// ---------------------------------------------------------------------------
+// Phase 5 — Kitchen Display System
+// ---------------------------------------------------------------------------
+//
+// The master spec's Kitchen Display section (§20) lists NO new tables — it
+// asks for "a kitchen dashboard" where kitchen staff see new orders and move
+// them through NEW → ACCEPTED → PREPARING → READY. That is deliberately NOT
+// modeled as a second status enum here: it is the exact same lifecycle
+// `OrderStatus` already implements (NEW=PENDING, ACCEPTED=CONFIRMED,
+// PREPARING=PREPARING, READY=READY), just presented with kitchen-facing
+// labels and filtered to the kitchen-relevant subset. `COMPLETED` (order
+// picked up/served) and `CANCELLED` stay front-of-house/whole-order concerns
+// already built in Phase 4 — the kitchen's job ends at READY. Building a
+// parallel `KitchenTicketStatus` enum synced to `OrderStatus` would be two
+// sources of truth for one state machine; `KitchenService` instead reads
+// `Order`/`OrderItem` directly and delegates every transition back to
+// `OrderService.updateStatus`, so the whitelisted transition table has
+// exactly one implementation. The only new column is `Order.requiredAt`
+// (see that field's comment above) for the spec's "Required time" — every
+// other kitchen-board field (order number = `Order.id`, items, modifiers,
+// special instructions = `Order.notes`/`OrderItem.notes`, table/order type,
+// current status) already exists on `Order`/`OrderItem`.
+
+enum OrderType {
+  DINE_IN
+  TAKEOUT
+  DELIVERY
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+}
+
+enum OrderPaymentMethod {
+  CASH
+  CARD
+  GCASH
+  MAYA
+  BANK_TRANSFER
+  OTHER
+}
+
+enum OrderPaymentStatus {
+  PENDING
+  COMPLETED
+  REFUNDED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOID
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  organizationId String
+  branchId       String
+  type           OrderType
+  status         OrderStatus @default(PENDING)
+
+  // Optional: registered account. Independent of the guest snapshot below,
+  // same pattern as Reservation.
+  customerUserId String?
+  guestName      String?
+  guestPhone     String?
+  guestEmail     String?
+  // Phase 8 — CRM. Optional link to the real Customer/CRM profile, distinct
+  // from customerUserId (a login account) — a guest with no account can
+  // still have a Customer profile staff created/matched at order time. Not
+  // auto-matched from guest contact fields; the caller supplies it
+  // explicitly (see CustomerService and the "Phase 8 — CRM" comment block).
+  customerId String?
+
+  // DINE_IN: tableId identifies where the order is being served; a walk-in
+  // dine-in order may or may not trace back to a reservationId.
+  tableId       String?
+  reservationId String?
+  // DELIVERY only — validated at the Zod layer, not the DB, same approach
+  // as Reservation's business-hours check.
+  deliveryAddress String?
+
+  // Always server-computed from the current menu at order time — see
+  // OrderService. Never trust a client-submitted total.
+  subtotal      Decimal @db.Decimal(10, 2)
+  taxTotal      Decimal @db.Decimal(10, 2)
+  discountTotal Decimal @default(0) @db.Decimal(10, 2)
+  // Phase 6 (Delivery) — snapshot of DeliveryZone.deliveryFee at order time,
+  // included in `total` below. Lives here (not only on DeliveryOrder) so the
+  // order's own total/payments/invoices are correct without every reader
+  // needing to join to DeliveryOrder — see the "Phase 6 — Delivery" comment
+  // block near DeliveryOrder for the full reasoning. Zero for non-delivery
+  // orders and for delivery orders placed without a zone.
+  deliveryFee Decimal @default(0) @db.Decimal(10, 2)
+  total       Decimal @db.Decimal(10, 2)
+
+  notes              String?
+  cancellationReason String?
+  cancelledAt        DateTime?
+
+  // Phase 5 (Kitchen Display System) — optional "have this ready by" time,
+  // set at order creation (e.g. a delivery pickup window or a table's
+  // requested timing). Null means "as soon as possible", the default for
+  // most walk-in dine-in/take-out orders. Purely informational: it drives
+  // the kitchen board's overdue indicator, it does not gate or auto-cancel
+  // anything.
+  requiredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     User?            @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  table        RestaurantTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  reservation  Reservation?     @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
+  payments      OrderPayment[]
+  invoices      Invoice[]
+  delivery      DeliveryOrder?
+  reviews       CustomerReview[]
+
+  @@index([organizationId])
+  // [branchId, createdAt] serves OrderService.list when status/type are
+  // omitted (the common "all orders" board view); Phase 15 hardening adds
+  // [branchId, status, createdAt] alongside it (not a replacement) for the
+  // equally common status-filtered board queries (e.g. status: 'PENDING'),
+  // which the 2-column index can't serve via a leftmost-prefix scan.
+  @@index([branchId, createdAt])
+  @@index([branchId, status, createdAt])
+  @@index([customerUserId])
+  @@index([customerId])
+  @@index([tableId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                String  @id @default(cuid())
+  orderId           String
+  menuItemId        String
+  menuItemVariantId String?
+
+  nameSnapshot      String
+  unitPriceSnapshot Decimal @db.Decimal(10, 2)
+  quantity          Int
+  lineSubtotal      Decimal @db.Decimal(10, 2)
+  modifiersTotal    Decimal @default(0) @db.Decimal(10, 2)
+  lineTotal         Decimal @db.Decimal(10, 2)
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  order     Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem  MenuItem            @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+  variant   MenuItemVariant?    @relation(fields: [menuItemVariantId], references: [id], onDelete: Restrict)
+  modifiers OrderItemModifier[]
+
+  @@index([orderId])
+  @@index([menuItemId])
+  @@map("order_items")
+}
+
+model OrderItemModifier {
+  id                 String   @id @default(cuid())
+  orderItemId        String
+  modifierId         String
+  nameSnapshot       String
+  priceDeltaSnapshot Decimal  @db.Decimal(10, 2)
+  createdAt          DateTime @default(now())
+
+  orderItem OrderItem    @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  modifier  MenuModifier @relation(fields: [modifierId], references: [id], onDelete: Restrict)
+
+  @@index([orderItemId])
+  @@map("order_item_modifiers")
+}
+
+model OrderStatusHistory {
+  id              String       @id @default(cuid())
+  orderId         String
+  fromStatus      OrderStatus?
+  toStatus        OrderStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime     @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+model OrderPayment {
+  id               String             @id @default(cuid())
+  organizationId   String
+  orderId          String
+  method           OrderPaymentMethod
+  amount           Decimal            @db.Decimal(10, 2)
+  status           OrderPaymentStatus @default(COMPLETED)
+  note             String?
+  recordedByUserId String?
+  createdAt        DateTime           @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_payments")
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  organizationId String
+  branchId       String
+  orderId        String
+
+  // Sequential per branch — see file header for the numbering scheme and
+  // its (documented, hand-written) partial unique index.
+  invoiceNumber String
+  status        InvoiceStatus @default(ISSUED)
+
+  subtotal      Decimal @db.Decimal(10, 2)
+  taxTotal      Decimal @db.Decimal(10, 2)
+  discountTotal Decimal @db.Decimal(10, 2)
+  total         Decimal @db.Decimal(10, 2)
+
+  issuedAt   DateTime  @default(now())
+  voidedAt   DateTime?
+  voidReason String?
+  notes      String?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  items        InvoiceItem[]
+
+  @@unique([branchId, invoiceNumber])
+  @@index([organizationId])
+  @@index([orderId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id                String  @id @default(cuid())
+  invoiceId         String
+  nameSnapshot      String
+  unitPriceSnapshot Decimal @db.Decimal(10, 2)
+  quantity          Int
+  lineTotal         Decimal @db.Decimal(10, 2)
+  // Flattened, human-readable modifier summary (e.g. "Extra Egg, Extra
+  // Rice") rather than a further-nested modifier table — an invoice line is
+  // a frozen historical snapshot, not a live editable structure.
+  modifiersSummary String?
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+model InvoiceSequence {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String   @unique
+  lastNumber     Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@map("invoice_sequences")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Delivery
+// ---------------------------------------------------------------------------
+//
+// Deviations / notable decisions (documented, not silent):
+//
+// 1. `DeliveryOrder` is a 1:1 COMPANION table to `Order`, not a merge of
+//    delivery fields onto Order itself. The master spec lists it as its own
+//    table (`delivery_orders`), and the reasoning holds up structurally too:
+//    dine-in/take-out orders would otherwise carry a permanent block of
+//    always-null delivery columns (zone, driver, pickup/delivery
+//    timestamps, proof of delivery). `DeliveryOrder` is created
+//    automatically, in the same transaction as the Order itself, whenever
+//    `type = DELIVERY` — see OrderService.createOrder. The one exception is
+//    `Order.deliveryFee`: that field DOES live on Order (see its own
+//    comment above) because the fee has to be part of `Order.total` for
+//    payments/invoices to be correct, and every reader of `Order.total`
+//    would otherwise need to join to `DeliveryOrder` just to know if a fee
+//    applies. `DeliveryOrder.deliveryFee` is a second snapshot of the exact
+//    same value, kept for delivery-domain reporting — not a second source
+//    of truth, both are written atomically in the same transaction.
+// 2. `DeliveryOrder` has its OWN status lifecycle (`DeliveryStatus`),
+//    deliberately NOT reusing `OrderStatus` the way Phase 5's kitchen board
+//    reused it for the kitchen lifecycle. This is an intentional contrast:
+//    Phase 5's NEW/ACCEPTED/PREPARING/READY genuinely IS the same lifecycle
+//    as `OrderStatus`'s PENDING/CONFIRMED/PREPARING/READY (one order, one
+//    kitchen ticket, one axis of progress). Delivery dispatch is a
+//    different axis entirely — a driver can be ASSIGNED and en route to the
+//    restaurant while the kitchen is still PREPARING, and the order isn't
+//    DELIVERED until well after the kitchen already marked it READY.
+//    Collapsing these into one enum would force illegal-looking states
+//    (what does "order status = delivered" even mean while the kitchen
+//    portion is a separate concept?) or silently drop information. Kept
+//    fully decoupled: `DeliveryService` never writes `Order.status`, and
+//    `OrderService` never writes `DeliveryOrder.status` — see
+//    docs/architecture.md § 14 for the full reasoning, including why this
+//    phase deliberately does NOT auto-complete the parent Order when a
+//    delivery finishes (a debatable business call left to staff/managers
+//    rather than silently automated).
+// 3. `Driver` is a separate profile table, not just "a User with the DRIVER
+//    role." The DRIVER role continues to gate authentication/authorization
+//    (login, `delivery:manage` permission) exactly as it did from Phase 1 —
+//    `Driver` adds the operational fields RBAC has no reason to carry
+//    (vehicle info, phone, active/on-duty flag) and is what `DeliveryOrder`
+//    actually assigns against. A user can hold the DRIVER role without (yet)
+//    having a Driver profile — same "role grants capability, profile
+//    carries domain data" split already used for Reservation/Order's
+//    optional `customerUserId` link.
+// 4. `DriverAssignment` is an APPEND-ONLY audit trail, separate from
+//    `DeliveryOrder.driverId` (the current-state pointer used for fast
+//    board queries) — same "denormalized current value + full history
+//    table" pattern as `TableStatusHistory`/`OrderStatusHistory`, applied
+//    here because reassignment (a driver backs out, gets swapped) is a
+//    real, distinct event worth its own timestamped record, not just
+//    another line in the generic status history.
+// 5. No real navigation/maps/geocoding — `lib/notifications` and a maps
+//    provider are still unconfigured (see docs/architecture.md § 7 Risks).
+//    "Zone" is a plain named area staff define themselves (e.g. "North
+//    District"), not a geofenced polygon. Proof of delivery is a staff
+//    -entered text note + optional recipient name, not a photo — no object
+//    storage is configured (see `.env.example`), same "no fake
+//    integrations" rule Phase 4 applied to payments.
+
+enum DeliveryStatus {
+  UNASSIGNED
+  ASSIGNED
+  PICKED_UP
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+model DeliveryZone {
+  id             String  @id @default(cuid())
+  organizationId String
+  branchId       String
+  name           String
+  description    String?
+  deliveryFee    Decimal @default(0) @db.Decimal(10, 2)
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch         Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  deliveryOrders DeliveryOrder[]
+
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX delivery_zones_branchId_name_active_key
+  // ON delivery_zones ("branchId", "name") WHERE (active);
+  @@index([organizationId])
+  @@map("delivery_zones")
+}
+
+model Driver {
+  id             String  @id @default(cuid())
+  organizationId String
+  branchId       String
+  userId         String  @unique
+  vehicleType    String?
+  vehiclePlate   String?
+  phone          String?
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch             @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries   DeliveryOrder[]
+  assignments  DriverAssignment[]
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("drivers")
+}
+
+model DeliveryOrder {
+  id             String         @id @default(cuid())
+  organizationId String
+  branchId       String
+  orderId        String         @unique
+  deliveryZoneId String?
+  driverId       String?
+  status         DeliveryStatus @default(UNASSIGNED)
+
+  // Snapshot of DeliveryZone.deliveryFee at order time — see the module
+  // header comment for why this duplicates (deliberately) Order.deliveryFee.
+  deliveryFee Decimal @default(0) @db.Decimal(10, 2)
+
+  estimatedDeliveryAt DateTime?
+  pickedUpAt          DateTime?
+  deliveredAt         DateTime?
+
+  // Lightweight, staff/driver-entered proof of delivery — see module header
+  // comment #5 for why this isn't a photo upload.
+  proofOfDeliveryNote String?
+  recipientName       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization  Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch                 @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  order         Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  deliveryZone  DeliveryZone?          @relation(fields: [deliveryZoneId], references: [id], onDelete: Restrict)
+  driver        Driver?                @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  statusHistory DeliveryStatusHistory[]
+  assignments   DriverAssignment[]
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([driverId])
+  @@map("delivery_orders")
+}
+
+model DeliveryStatusHistory {
+  id              String          @id @default(cuid())
+  deliveryOrderId String
+  fromStatus      DeliveryStatus?
+  toStatus        DeliveryStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime        @default(now())
+
+  deliveryOrder DeliveryOrder @relation(fields: [deliveryOrderId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryOrderId])
+  @@map("delivery_status_history")
+}
+
+model DriverAssignment {
+  id              String    @id @default(cuid())
+  deliveryOrderId String
+  driverId        String
+  assignedByUserId String?
+  assignedAt      DateTime  @default(now())
+  // Set when this assignment is superseded (reassigned to another driver,
+  // or the delivery is cancelled) — null means "currently active."
+  unassignedAt    DateTime?
+  note            String?
+
+  deliveryOrder DeliveryOrder @relation(fields: [deliveryOrderId], references: [id], onDelete: Cascade)
+  driver        Driver        @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryOrderId])
+  @@index([driverId])
+  @@map("driver_assignments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 — Catering
+// ---------------------------------------------------------------------------
+//
+// Master spec §21-22 names all seven tables below explicitly and specifies
+// the funnel: Inquiry -> Quote -> Accept -> Deposit -> Event -> Final
+// payment. Five design decisions worth recording:
+//
+// 1. `CateringQuote` carries the fee breakdown the spec's quotation formula
+//    requires (Food + Staffing + Equipment + Transportation + Setup +
+//    Service Fees - Discounts + Taxes = TOTAL) as named Decimal columns,
+//    not a generic "line items of arbitrary category" table. Only the food
+//    portion gets real line items (`CateringQuoteItem`, mirroring
+//    `OrderItem`) because that is the part with a genuine per-unit
+//    breakdown (dish x quantity x price); staffing/equipment/transportation
+//    /setup/service-fee are quoted as flat negotiated amounts in real
+//    catering practice, not itemized against a fixed catalog this build
+//    doesn't have (no staffing-rate-card or equipment-rental system
+//    exists). `CateringQuote.total` is server-computed from these columns
+//    by `CateringService`, the same "never trust a client-submitted total"
+//    rule Phase 4 established for `Order`.
+// 2. `CateringEvent` is a 1:1 companion to `CateringQuote` (`@unique
+//    quoteId`), created automatically — in the same transaction as the
+//    quote's ACCEPTED transition — exactly as master spec §22 states ("When
+//    accepted, create the appropriate catering event"). Same reasoning as
+//    Phase 6's `Order` -> `DeliveryOrder` split: an event only ever exists
+//    for an accepted quote, so modeling it as a nullable set of columns on
+//    `CateringQuote` itself would be equivalent but muddier, and a 1:1
+//    table matches the master spec's own table list. `CateringEvent.total`
+//    and `depositAmount` are snapshotted from the quote at accept time
+//    (the same "menu prices can change later, order history shouldn't"
+//    principle `OrderItem` established), and `CateringEventItem` rows are
+//    snapshotted from `CateringQuoteItem` for the same reason.
+// 3. `CateringPayment` is its own real table (as the master spec's table
+//    list requires), not fields-on-the-row the way Phase 3 modeled
+//    `Reservation`'s single deposit. Catering genuinely needs more than one
+//    payment over the funnel's lifetime (a deposit, then a final balance
+//    payment, sometimes more) — the same reason Phase 4 gave `Order` a real
+//    `OrderPayment` table instead of a single field. `type` (DEPOSIT /
+//    BALANCE) records which stage of the funnel a payment closes out;
+//    `method`/`status` reuse the existing `OrderPaymentMethod`/
+//    `OrderPaymentStatus` enums rather than duplicating them, because "how
+//    was this paid" and "did it clear or get refunded" are domain concepts
+//    independent of order vs. catering — one enum, two payment tables, not
+//    two enums for the same real-world values.
+// 4. `CateringInquiry`/`CateringEvent` use the same optional
+//    `customerUserId` + guest-snapshot (`guestName`/`guestEmail`/
+//    `guestPhone`) pattern `Order`/`Reservation` already established —
+//    there is still no dedicated `customers` table (that is Phase 8's CRM
+//    scope), so a catering customer is either a registered `User` or a
+//    plain guest-contact snapshot, exactly like every other customer-facing
+//    entity built so far.
+// 5. No real e-signature, PDF quote generation, or customer self-service
+//    portal — `CateringQuote.status` (DRAFT/SENT/VIEWED/ACCEPTED/REJECTED/
+//    EXPIRED/CANCELLED) and its `sentAt`/`viewedAt`/`respondedAt`/
+//    `expiresAt` timestamps are staff-recorded state transitions
+//    (`CateringService`), not the product of an actual customer-facing
+//    quote-viewing UI or e-signature integration — neither is configured
+//    (see docs/architecture.md § 7 Risks). This mirrors Phase 4's "no
+//    payment provider configured, payments are staff-recorded" stance
+//    applied to the quoting funnel instead.
+
+enum CateringInquiryStatus {
+  NEW
+  QUOTED
+  CONVERTED
+  CANCELLED
+}
+
+enum CateringQuoteStatus {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum CateringEventStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum CateringPaymentType {
+  DEPOSIT
+  BALANCE
+}
+
+model CateringPackage {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  name           String
+  description    String?
+  pricePerGuest  Decimal  @db.Decimal(10, 2)
+  minGuests      Int?
+  maxGuests      Int?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch            @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  inquiries    CateringInquiry[]
+  quotes       CateringQuote[]
+
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX catering_packages_branchId_name_active_key
+  // ON catering_packages ("branchId", "name") WHERE (active);
+  @@index([organizationId])
+  @@map("catering_packages")
+}
+
+model CateringInquiry {
+  id             String                @id @default(cuid())
+  organizationId String
+  branchId       String
+
+  // Optional registered account, independent of the guest snapshot below —
+  // same pattern as Order/Reservation (see module header comment #4).
+  customerUserId String?
+  guestName      String?
+  guestEmail     String?
+  guestPhone     String?
+  // Phase 8 — CRM. Optional link to the real Customer/CRM profile — see the
+  // matching comment on Order.customerId.
+  customerId String?
+
+  eventType         String
+  eventDate         DateTime
+  location          String
+  guestCount        Int
+  packageId         String?
+  menuRequirements  String?
+  equipmentRequests String?
+  staffRequests     String?
+  setupRequests     String?
+  deliveryRequested Boolean               @default(false)
+  deliveryAddress   String?
+  specialRequests   String?
+  status            CateringInquiryStatus @default(NEW)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     User?            @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  package      CateringPackage? @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  quotes       CateringQuote[]
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([customerUserId])
+  @@index([customerId])
+  @@map("catering_inquiries")
+}
+
+model CateringQuote {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  inquiryId      String
+  packageId      String?
+  guestCount     Int
+
+  // Server-computed by CateringService, mirroring the master spec's
+  // quotation formula — see module header comment #1 for why only the food
+  // portion (CateringQuoteItem) is itemized.
+  foodTotal           Decimal @default(0) @db.Decimal(10, 2)
+  staffingTotal       Decimal @default(0) @db.Decimal(10, 2)
+  equipmentTotal      Decimal @default(0) @db.Decimal(10, 2)
+  transportationTotal Decimal @default(0) @db.Decimal(10, 2)
+  setupTotal          Decimal @default(0) @db.Decimal(10, 2)
+  serviceFeeTotal     Decimal @default(0) @db.Decimal(10, 2)
+  discountTotal       Decimal @default(0) @db.Decimal(10, 2)
+  taxTotal            Decimal @default(0) @db.Decimal(10, 2)
+  total               Decimal @default(0) @db.Decimal(10, 2)
+
+  status             CateringQuoteStatus @default(DRAFT)
+  sentAt             DateTime?
+  viewedAt           DateTime?
+  respondedAt        DateTime?
+  expiresAt          DateTime?
+  rejectionReason    String?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  inquiry      CateringInquiry     @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  package      CateringPackage?    @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  items        CateringQuoteItem[]
+  event        CateringEvent?
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([inquiryId])
+  @@map("catering_quotes")
+}
+
+model CateringQuoteItem {
+  id          String  @id @default(cuid())
+  quoteId     String
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @db.Decimal(10, 2)
+  lineTotal   Decimal @db.Decimal(10, 2)
+
+  quote CateringQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@index([quoteId])
+  @@map("catering_quote_items")
+}
+
+model CateringEvent {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  quoteId        String @unique
+
+  // Optional registered account, independent of the guest snapshot below —
+  // same pattern as Order/Reservation (see module header comment #4).
+  customerUserId String?
+  guestName      String?
+  guestEmail     String?
+  guestPhone     String?
+  // Phase 8 — CRM. Copied from CateringQuote.inquiry.customerId at
+  // ACCEPTED-transition time — see CateringService.updateQuoteStatus. Not
+  // directly settable by API input, same "snapshot, not live join" reasoning
+  // as the other CateringEvent fields copied from the inquiry.
+  customerId String?
+
+  eventType  String
+  eventDate  DateTime
+  location   String
+  guestCount Int
+  status     CateringEventStatus @default(SCHEDULED)
+
+  // Snapshotted from the accepted CateringQuote at creation time — see
+  // module header comment #2 for why (menu/pricing can change later, event
+  // history shouldn't).
+  total         Decimal @db.Decimal(10, 2)
+  depositAmount Decimal @default(0) @db.Decimal(10, 2)
+
+  notes              String?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  quote        CateringQuote       @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  customer     User?               @relation(fields: [customerUserId], references: [id], onDelete: SetNull)
+  crmCustomer  Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  items        CateringEventItem[]
+  payments     CateringPayment[]
+  reviews      CustomerReview[]
+
+  @@index([organizationId])
+  @@index([branchId, status])
+  @@index([customerUserId])
+  @@index([customerId])
+  @@map("catering_events")
+}
+
+model CateringEventItem {
+  id          String  @id @default(cuid())
+  eventId     String
+  description String
+  quantity    Int
+  unitPrice   Decimal @db.Decimal(10, 2)
+  lineTotal   Decimal @db.Decimal(10, 2)
+
+  event CateringEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@map("catering_event_items")
+}
+
+model CateringPayment {
+  id             String              @id @default(cuid())
+  organizationId String
+  branchId       String
+  eventId        String
+  type           CateringPaymentType
+  method         OrderPaymentMethod
+  amount         Decimal             @db.Decimal(10, 2)
+  status         OrderPaymentStatus  @default(COMPLETED)
+  note           String?
+  recordedByUserId String?
+  createdAt      DateTime            @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  event        CateringEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([eventId])
+  @@map("catering_payments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 — CRM
+// ---------------------------------------------------------------------------
+//
+// Master spec §9 names the table list (`customers`, `customer_addresses`,
+// `customer_preferences`, `customer_notes`, `customer_tags`); §31 lists what
+// to track (orders/reservations/catering counts, spend, average order value,
+// first/last transaction, favorite products, visit frequency, lifetime
+// value); §32 asks for RFM (Recency/Frequency/Monetary) segmentation into
+// NEW/RETURNING/REGULAR/VIP/AT_RISK/INACTIVE/HIGH_VALUE with "configurable"
+// thresholds. Phase 8's own build list additionally names "Reviews" with no
+// field-level spec anywhere in the document — `CustomerReview` below is this
+// build's own design, documented as such rather than presented as spec'd.
+// Five design decisions worth recording:
+//
+// 1. `Customer` is a real profile table, deliberately separate from `User`
+//    — the same "role/account grants capability, profile carries domain
+//    data" split Phase 6 used for `Driver` vs. the DRIVER role. Most
+//    restaurant customers are walk-ins or phone/guest orders who never
+//    create a login account at all, so a CRM profile has to be able to
+//    exist independently of one; `Customer.userId` (nullable, `@unique`) is
+//    the optional link for the minority who do register. Per §9's literal
+//    field list, `Customer` carries only `organizationId` — no `branchId` —
+//    since a customer's relationship is with the restaurant business, not
+//    one physical location; a customer who orders from Branch A and dines
+//    at Branch B is still one customer.
+// 2. To make "total orders / total spend / favorite products / last
+//    transaction" genuinely queryable rather than fragile email-string
+//    matching across guest checkouts, this phase adds a nullable
+//    `customerId` column (`onDelete: SetNull`) to `Order`, `Reservation`,
+//    and `CateringInquiry` — the relation field is named `crmCustomer` to
+//    keep it visually distinct from each model's existing `customer` field
+//    (the `User?` relation via `customerUserId`, an unrelated concept: "was
+//    there a login account"). `CateringEvent.customerId` is the same idea
+//    but is never set directly by API input — `CateringService` copies it
+//    from `CateringQuote.inquiry.customerId` at the `ACCEPTED` transition,
+//    the same "snapshot at accept-time" treatment already given to
+//    `CateringEvent`'s guest-contact fields. None of this is auto-matched
+//    from guest name/email/phone — staff explicitly attach a `Customer` via
+//    the CRM UI (search-or-create), which is a deliberate scope boundary:
+//    fuzzy customer-matching/de-duplication is a real feature with real
+//    false-positive risk (merging two different people who share a phone
+//    number), not built here.
+// 3. `CustomerReview.rating` is enforced as an integer 1-5 by a hand-written
+//    `CHECK` constraint in the migration (Prisma's schema DSL has no CHECK
+//    support, the same gap Phase 3's `EXCLUDE` constraint and Phase 4's
+//    partial unique index hit) in addition to the Zod-layer bound — the
+//    database is the real guarantee, Zod is the friendly error message.
+//    Every review in this build is `recordedByUserId`-attributed staff
+//    entry, not a customer-submitted rating — there is no customer-facing
+//    review form (see point 5).
+// 4. RFM segmentation is computed on read, in `lib/crm/rfm.ts`
+//    (`classifySegment`), never stored as a column on `Customer`. This
+//    build has no background job scheduler (the same honest gap Phase 5's
+//    kitchen board polls around, and Phase 14/Notifications hasn't been
+//    built yet) — a stored `segment` column would silently go stale with
+//    nothing to ever recompute it. Computing it live from `Order`/
+//    `Reservation`/`CateringEvent` aggregates on every profile/list read is
+//    the correct trade-off at this build's current scale, not a shortcut.
+//    `Customer.status` (ACTIVE/INACTIVE/BLOCKED) is a different, orthogonal
+//    concept — a staff-set administrative flag (e.g. "this guest is
+//    banned"), not the computed analytics segment.
+// 5. §32's "make thresholds configurable" is honored via
+//    `Organization.crmSettings` (nullable `Json`), following the same
+//    "JSON column, code supplies the default when null" pattern
+//    `Branch.openingHours` already established in Phase 1 — not a new
+//    dedicated settings table for a handful of numbers. `lib/crm/rfm.ts`
+//    exports `DEFAULT_RFM_THRESHOLDS` and `resolveRfmThresholds(org)`,
+//    which merges any `crmSettings.rfmThresholds` override over the
+//    defaults, field by field.
+// ---------------------------------------------------------------------------
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+model Customer {
+  id             String         @id @default(cuid())
+  organizationId String
+  // Optional: set only when this customer also has a registered User
+  // account. Independent of everything else here — see module header #1.
+  userId         String?        @unique
+  firstName      String
+  lastName       String?
+  email          String?
+  phone          String?
+  dateOfBirth    DateTime?
+  status         CustomerStatus @default(ACTIVE)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
+  addresses    CustomerAddress[]
+  preferences  CustomerPreference[]
+  notes        CustomerNote[]
+  tags         CustomerTag[]
+  reviews      CustomerReview[]
+  orders       Order[]
+  reservations Reservation[]
+  cateringInquiries CateringInquiry[]
+  cateringEvents    CateringEvent[]
+
+  @@index([organizationId])
+  @@index([organizationId, email])
+  @@index([organizationId, phone])
+  @@map("customers")
+}
+
+model CustomerAddress {
+  id         String   @id @default(cuid())
+  customerId String
+  // e.g. "Home", "Office" — free text, not an enum; addresses are for
+  // delivery convenience, not a workflow with legal statuses.
+  label      String?
+  line1      String
+  line2      String?
+  city       String?
+  province   String?
+  postalCode String?
+  country    String   @default("PH")
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("customer_addresses")
+}
+
+model CustomerPreference {
+  id         String   @id @default(cuid())
+  customerId String
+  // Free-form key/value (e.g. key "dietary", value "vegetarian"; key
+  // "seating", value "booth by the window") rather than a fixed set of
+  // typed columns — the master spec names the table with no field list, and
+  // a restaurant's meaningful preferences vary too much to hard-code.
+  key        String
+  value      String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, key])
+  @@map("customer_preferences")
+}
+
+model CustomerNote {
+  id           String   @id @default(cuid())
+  customerId   String
+  authorUserId String?
+  note         String
+  createdAt    DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  author   User?    @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+  @@map("customer_notes")
+}
+
+model CustomerTag {
+  id              String   @id @default(cuid())
+  customerId      String
+  tag             String
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([customerId, tag])
+  @@map("customer_tags")
+}
+
+model CustomerReview {
+  id               String   @id @default(cuid())
+  organizationId   String
+  branchId         String?
+  customerId       String?
+  orderId          String?
+  reservationId    String?
+  cateringEventId  String?
+  // Bounded 1-5 by a hand-written CHECK constraint in the migration — see
+  // module header #3.
+  rating           Int
+  comment          String?
+  recordedByUserId String?
+  createdAt        DateTime @default(now())
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  customer      Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  order         Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  reservation   Reservation?   @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  cateringEvent CateringEvent? @relation(fields: [cateringEventId], references: [id], onDelete: SetNull)
+  recordedBy    User?          @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([orderId])
+  @@index([reservationId])
+  @@index([cateringEventId])
+  @@map("customer_reviews")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9 — Inventory
+// ---------------------------------------------------------------------------
+//
+// Master spec §13 (Ingredients and Recipes) and §14 (Inventory) list two
+// groups of tables; §37 asks for inventory to connect to financial
+// accounting (deferred to Phase 10's real double-entry ledger — this phase
+// only builds the inventory-side half: real quantity/cost tracking that a
+// later AccountingService can post journal entries from).
+//
+// Design decisions:
+//
+// 1. Two scoping tiers, matching the split this schema already uses for
+//    MenuItem (organization-scoped catalog) vs. RestaurantTable
+//    (branch-scoped operational data). Unit/Ingredient/Recipe/RecipeItem
+//    are catalog data — "what is Chicken, what unit do we track it in,
+//    what does a Chicken Rice Meal require" is the same answer at every
+//    branch. InventoryItem/InventoryTransaction/Supplier/PurchaseOrder/
+//    StockCount/WasteRecord are branch-scoped operational data — how much
+//    Chicken is actually on the shelf, and every movement of it, is a
+//    per-location fact.
+//
+// 2. quantityOnHand is never written directly outside a transaction row.
+//    Every InventoryService method that changes stock creates a matching
+//    InventoryTransaction (append-only, never updated/deleted) inside the
+//    same DB transaction as the InventoryItem.quantityOnHand update — the
+//    literal "never silently alter inventory quantities... every
+//    adjustment must have an audit trail" instruction from §14. All seven
+//    spec'd transaction types are real, reachable code paths this phase:
+//    PURCHASE (PO receiving), SALE_CONSUMPTION (recipe-based consumption
+//    on order completion), WASTE (WasteRecord creation), ADJUSTMENT/RETURN
+//    (InventoryService.recordAdjustment, a signed manual correction),
+//    TRANSFER (InventoryService.transferStock, two linked rows across
+//    branches), and COUNT_CORRECTION (StockCount completion, one row per
+//    line with a nonzero variance). quantityOnHand is allowed to go
+//    negative — blocking an order from completing, or a waste record from
+//    being logged, because a stock ledger under-counts real inventory
+//    would be worse than letting the ledger go negative until the next
+//    stock count corrects it.
+//
+// 3. Unit conversion is a single-level chain, not a general graph. A
+//    "base" unit has baseUnitId = null; a "derived" unit points at exactly
+//    one base unit with a conversionFactor (how many of the derived unit
+//    equal one base unit — e.g. Gram.conversionFactor = 1000 with
+//    Gram.baseUnitId = Kilogram.id). A derived unit's own baseUnitId must
+//    itself be a base unit (depth capped at 1) — enforced in
+//    InventoryService, not the DB, the same "app enforces, DB allows"
+//    tradeoff Phase 8's RFM threshold validation already uses. See
+//    lib/inventory/units.ts for the pure conversion function this backs.
+//    Deliberately not a full transitive unit graph — every real recipe
+//    only ever needs "grams to kilograms" or "milliliters to liters", not
+//    an open-ended conversion solver.
+//
+// 4. Recipe is keyed 1:1 to MenuItem (@unique menuItemId), not to
+//    MenuItemVariant or MenuModifier. A "Large" variant using more
+//    ingredients than the base item, or an "Extra Cheese" modifier
+//    consuming its own stock, are real restaurant scenarios this phase
+//    does not model — recipe quantities scale only by
+//    OrderItem.quantity, not by which variant/modifiers were selected.
+//    Documented as a scope boundary, not silently ignored: a restaurant
+//    with meaningfully different variant recipes would need this
+//    extended before its inventory numbers are trustworthy.
+//
+// 5. InventoryTransaction's reference to "what caused this" (an Order, a
+//    PurchaseOrder, a StockCount) is a loose (referenceType, referenceId)
+//    string pair, not five nullable foreign keys — Prisma's schema DSL has
+//    no first-class polymorphic relation support, and this ledger is
+//    written to by several unrelated tables. unitCostAtTime is a snapshot
+//    (not a live join to Ingredient.costPerUnit) for the same reason
+//    OrderItem snapshots menu prices: a later cost change must not rewrite
+//    the historical COGS of an already-completed order.
+//
+// 6. No automatic InventoryItem creation when an Ingredient is added — a
+//    restaurant may define an ingredient in its recipe catalog long before
+//    stocking it at every branch (or ever, at some branches). Staff (or
+//    PO receiving, which auto-creates the InventoryItem row it needs) opts
+//    a branch into tracking a given ingredient explicitly.
+
+model Unit {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  abbreviation   String
+  // See module header #3. Null on a base unit; on a derived unit, points at
+  // its single base and carries the conversion factor to it.
+  baseUnitId       String?
+  conversionFactor Decimal  @default(1) @db.Decimal(14, 6)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  baseUnit           Unit?               @relation("UnitConversion", fields: [baseUnitId], references: [id], onDelete: Restrict)
+  derivedUnits       Unit[]              @relation("UnitConversion")
+  ingredients        Ingredient[]
+  recipeItems        RecipeItem[]
+  purchaseOrderItems PurchaseOrderItem[]
+
+  @@unique([organizationId, abbreviation])
+  @@index([organizationId])
+  @@map("units")
+}
+
+model Ingredient {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  stockUnitId    String
+  // Cost per one stockUnit. Manually maintained, or refreshed from
+  // InventoryService.receivePurchaseOrderItems (see that method for the
+  // "last purchase cost wins" policy).
+  costPerUnit    Decimal  @default(0) @db.Decimal(12, 4)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  stockUnit          Unit                @relation(fields: [stockUnitId], references: [id], onDelete: Restrict)
+  recipeItems         RecipeItem[]
+  inventoryItems      InventoryItem[]
+  purchaseOrderItems  PurchaseOrderItem[]
+
+  @@index([organizationId])
+  @@map("ingredients")
+}
+
+model Recipe {
+  id             String   @id @default(cuid())
+  organizationId String
+  menuItemId     String   @unique
+  // Servings this recipe's listed RecipeItem quantities produce.
+  // Consumption scales by (orderItem.quantity / yieldQuantity) — a
+  // yieldQuantity of 1 (the default) means "these quantities are per single
+  // serving," the common case.
+  yieldQuantity  Decimal  @default(1) @db.Decimal(10, 2)
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  menuItem     MenuItem     @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  items        RecipeItem[]
+
+  @@index([organizationId])
+  @@map("recipes")
+}
+
+model RecipeItem {
+  id           String  @id @default(cuid())
+  recipeId     String
+  ingredientId String
+  quantity     Decimal @db.Decimal(12, 4)
+  unitId       String
+
+  recipe     Recipe     @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  unit       Unit       @relation(fields: [unitId], references: [id], onDelete: Restrict)
+
+  @@unique([recipeId, ingredientId])
+  @@index([recipeId])
+  @@map("recipe_items")
+}
+
+enum InventoryTransactionType {
+  PURCHASE
+  SALE_CONSUMPTION
+  WASTE
+  ADJUSTMENT
+  RETURN
+  TRANSFER
+  COUNT_CORRECTION
+}
+
+model InventoryItem {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  ingredientId   String
+  // The running balance — see module header #2 for how this is kept
+  // honest. Allowed to go negative on purpose.
+  quantityOnHand Decimal  @default(0) @db.Decimal(14, 4)
+  // "Low Stock" / "Critical Stock" thresholds (owner dashboard terms from
+  // the master spec's analytics section) — both nullable and independently
+  // configurable per item; null means "no alerting configured for this
+  // item yet."
+  reorderPoint   Decimal? @db.Decimal(14, 4)
+  criticalPoint  Decimal? @db.Decimal(14, 4)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch          Branch                 @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  ingredient      Ingredient             @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  transactions    InventoryTransaction[]
+  stockCountItems StockCountItem[]
+  wasteRecords    WasteRecord[]
+
+  @@unique([branchId, ingredientId])
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("inventory_items")
+}
+
+model InventoryTransaction {
+  id              String                   @id @default(cuid())
+  organizationId  String
+  branchId        String
+  inventoryItemId String
+  type            InventoryTransactionType
+  // Signed: positive increases quantityOnHand, negative decreases it.
+  quantityDelta   Decimal                  @db.Decimal(14, 4)
+  // Running balance immediately after this row — see module header #2.
+  quantityAfter   Decimal                  @db.Decimal(14, 4)
+  // Snapshot cost per unit at transaction time — see module header #5.
+  unitCostAtTime  Decimal?                 @db.Decimal(12, 4)
+  referenceType   String?
+  referenceId     String?
+  note            String?
+  recordedByUserId String?
+  createdAt       DateTime                 @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  recordedBy    User?         @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([inventoryItemId, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("inventory_transactions")
+}
+
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  contactName    String?
+  email          String?
+  phone          String?
+  address        String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  purchaseOrders PurchaseOrder[]
+
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX suppliers_organizationId_name_active_key
+  // ON suppliers ("organizationId", "name") WHERE (active);
+  @@index([organizationId])
+  @@map("suppliers")
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SUBMITTED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id                 String              @id @default(cuid())
+  organizationId     String
+  branchId           String
+  supplierId         String
+  status             PurchaseOrderStatus @default(DRAFT)
+  // Server-computed sum of item lineTotals — never accepted from the client.
+  total              Decimal             @default(0) @db.Decimal(12, 2)
+  expectedAt         DateTime?
+  submittedAt        DateTime?
+  receivedAt         DateTime?
+  notes              String?
+  cancellationReason String?
+  createdByUserId    String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  createdBy    User?               @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  items        PurchaseOrderItem[]
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([supplierId])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id               String  @id @default(cuid())
+  purchaseOrderId  String
+  ingredientId     String
+  unitId           String
+  quantityOrdered  Decimal @db.Decimal(14, 4)
+  quantityReceived Decimal @default(0) @db.Decimal(14, 4)
+  unitCost         Decimal @db.Decimal(12, 4)
+  lineTotal        Decimal @db.Decimal(12, 2)
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  ingredient    Ingredient    @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  unit          Unit          @relation(fields: [unitId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseOrderId])
+  @@map("purchase_order_items")
+}
+
+enum StockCountStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
+model StockCount {
+  id               String           @id @default(cuid())
+  organizationId   String
+  branchId         String
+  status           StockCountStatus @default(OPEN)
+  notes            String?
+  recordedByUserId String?
+  completedAt      DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  recordedBy   User?            @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
+  items        StockCountItem[]
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id               String   @id @default(cuid())
+  stockCountId     String
+  inventoryItemId  String
+  // Snapshot of InventoryItem.quantityOnHand when this line was opened, so
+  // the variance always reflects "what we counted vs. what the ledger said
+  // at count time," not a since-moved running balance.
+  expectedQuantity Decimal  @db.Decimal(14, 4)
+  countedQuantity  Decimal? @db.Decimal(14, 4)
+
+  stockCount    StockCount    @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@unique([stockCountId, inventoryItemId])
+  @@index([stockCountId])
+  @@map("stock_count_items")
+}
+
+model WasteRecord {
+  id               String   @id @default(cuid())
+  organizationId   String
+  branchId         String
+  inventoryItemId  String
+  quantity         Decimal  @db.Decimal(14, 4)
+  reason           String
+  recordedByUserId String?
+  createdAt        DateTime @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  recordedBy    User?         @relation(fields: [recordedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@map("waste_records")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10 — Accounting
+// ---------------------------------------------------------------------------
+//
+// Master spec §27 ("implement a proper double-entry accounting architecture
+// ... each journal entry must balance ... do not allow a posted journal
+// entry to be directly edited, use reversal/correction entries"), §28 (seed
+// a configurable chart of accounts), §29/§37 (a financial transaction
+// engine mapping real business events — sales, deposits, purchases,
+// consumption, waste, expenses — to journal entries, deterministically, "AI
+// must never directly invent accounting entries"), §23 (customer deposits
+// are a liability until earned, not automatic revenue), §30 (expense
+// tracking), §45 (a dedicated AccountingService), §49 (automated proof that
+// SUM(DEBITS) = SUM(CREDITS)). Six design decisions:
+//
+// 1. `ChartOfAccount` is organization-scoped and seeded per-organization at
+//    registration (`AuthService.register`, mirroring how Phase 1 seeds
+//    default roles) rather than being a single global chart every tenant
+//    shares — §28's "seed an initial configurable chart" plus §37's "all
+//    rules must be configurable" both imply per-tenant control (a
+//    restaurant might rename "Marketing" to something else, add a branch-
+//    specific expense account, etc.), which a shared global chart can't
+//    support. `AccountingService.ensureChartOfAccounts` is idempotent
+//    (checks before creating) so it is also safely callable for an
+//    organization that existed before this phase shipped — exactly the
+//    demo seed org's situation, since it was created by Phase 1's seed
+//    script long before `ChartOfAccount` existed.
+// 2. The audit-trail discipline Phase 9 established for `InventoryItem.
+//    quantityOnHand` — one code path writes it, always paired with a ledger
+//    row — repeats here, one level up: a `JournalEntry`'s lines are never
+//    updated once `status` moves to `POSTED` (application-enforced; there
+//    is no "update journal entry lines" service method at all once posted,
+//    the same "the guarantee is structural, not conventional" reasoning).
+//    Correcting a posted entry means `AccountingService.reverseJournalEntry`
+//    — a brand-new entry with every line's debit/credit swapped, referencing
+//    the original via `reversalOfEntryId`. The original's own `status`
+//    field does flip to `REVERSED` (a lifecycle marker, the same kind of
+//    post-creation status change every other model in this codebase makes
+//    freely — Order/Invoice/PurchaseOrder/etc.) but its `JournalEntryLine`
+//    rows, the actual accounting content, are never touched.
+// 3. `FinancialTransaction` is the idempotency/link layer master spec §47
+//    calls for explicitly ("implement idempotency for ... financial
+//    posting ... a repeated request must not accidentally create duplicate
+//    ... journal entries"). Every automatic posting (order revenue, a
+//    deposit, a PO receipt, waste, an approved expense) creates exactly one
+//    `FinancialTransaction` alongside its `JournalEntry`, keyed by
+//    `@@unique([referenceType, referenceId, type])` — a retried
+//    "complete this order" call cannot double-post its revenue entry, a
+//    second call simply finds the existing link and does nothing further.
+//    This is also the honest place to note a real scope boundary: the
+//    order/reservation/catering/inventory transitions that trigger these
+//    postings are themselves already guarded against reentrancy by their
+//    own state machines (e.g. `Order.status` can only leave `COMPLETED` to
+//    nowhere — see `OrderService`'s `ALLOWED_TRANSITIONS`), so the unique
+//    constraint here is defense-in-depth for a path that is not actually
+//    reachable through this build's own API today, not a currently-
+//    exploitable gap being left open.
+// 4. Deposits are never posted straight to a revenue account — §23's
+//    explicit rule. A reservation deposit or a catering `DEPOSIT` payment
+//    posts Debit Cash / Credit "Customer Deposits" (a liability). Revenue
+//    is recognized — Debit Customer Deposits / Credit the relevant revenue
+//    account — only when the service is actually rendered: a `Reservation`
+//    reaching `COMPLETED` (with a `PAID` deposit), or a catering
+//    `BALANCE` payment being recorded (treated as "the event happened, the
+//    customer settled the account, the full event total is now earned" —
+//    simpler and more robust than trying to key revenue recognition off
+//    `CateringEvent.status` and payment amounts independently, at the cost
+//    of a documented simplification: revenue is recognized at final-payment
+//    time, not exactly at event-completion time, if those two moments ever
+//    diverge in a future workflow change). Both policies are flagged in
+//    `CLAUDE.md` as exactly the kind of local accounting-policy decision
+//    §68 asks to have reviewed by a real accountant, not silently assumed
+//    correct.
+// 5. `AccountingPeriod` is a plain calendar-month bucket, auto-created on
+//    demand (`AccountingService.ensureOpenPeriodForDate`) the first time an
+//    entry needs to post into a given month, rather than requiring an
+//    accountant to pre-create periods by hand before any transaction can
+//    happen. Closing a period (`closePeriod`) is a real, enforced gate: it
+//    refuses if any `DRAFT` journal entry is dated inside that period
+//    (nothing can be silently left half-posted when the books close), and
+//    once `CLOSED`, no new or reversing entry may be dated inside it — a
+//    correction to a closed period posts as a new entry in the current open
+//    period instead, standard closed-period accounting practice.
+// 6. `Vendor` (this phase, §30) and `Supplier` (Phase 9, §14) are kept as
+//    two separate tables despite being structurally almost identical —
+//    deliberately, not from a missed dedup opportunity. A `Supplier` sells
+//    ingredients and is referenced by `PurchaseOrder`, which posts to
+//    `Inventory`/`Accounts Payable`; a `Vendor` is billed for a general
+//    business expense (rent, software, a marketing platform) and is
+//    referenced by `Expense`, which posts to whatever account its
+//    `ExpenseCategory` maps to. The master spec lists them as separate
+//    concepts in separate sections (§14 vs. §30) with separate purposes,
+//    and conflating them would blur "who do we buy ingredients from" with
+//    "who do we pay for overhead" — a real distinction a restaurant owner
+//    would expect kept apart, even though today's fields happen to match.
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  COGS
+  EXPENSE
+}
+
+enum DebitCredit {
+  DEBIT
+  CREDIT
+}
+
+// Phase 11 — classifies a non-cash account for the Cash Flow Statement's
+// direct method (see ReportingService.generateCashFlow's file-header
+// comment for the full reasoning). Master spec §35 gives only the generic
+// textbook categories with no restaurant-specific mapping, so this build
+// stores the classification explicitly on the chart rather than guessing
+// it from account type/name at report time.
+enum CashFlowCategory {
+  OPERATING
+  INVESTING
+  FINANCING
+}
+
+model ChartOfAccount {
+  id             String      @id @default(cuid())
+  organizationId String
+  // Simple numeric-prefix scheme (1xxx assets, 2xxx liabilities, 3xxx
+  // equity, 4xxx revenue, 5xxx COGS, 6xxx expenses) — not mandated by the
+  // master spec, but a conventional, sortable code every seeded account
+  // gets so the chart reads in a sensible order.
+  code           String
+  name           String
+  type           AccountType
+  // Which side increases this account's balance — derivable from `type`
+  // (ASSET/COGS/EXPENSE = DEBIT, LIABILITY/EQUITY/REVENUE = CREDIT) but
+  // stored explicitly so balance/trial-balance queries never need a
+  // hardcoded type→side switch statement scattered through the service.
+  normalBalance  DebitCredit
+  description    String?
+  // Seeded default accounts (see AccountingService.ensureChartOfAccounts).
+  // Not a delete-protection flag at the DB level (RESTRICT on
+  // JournalEntryLine.accountId already prevents deleting any account with
+  // postings) — purely informational, so the UI can visually distinguish
+  // "part of the standard chart" from an org's own custom accounts.
+  isSystem       Boolean     @default(true)
+  active         Boolean     @default(true)
+  // Phase 11 — true only for the accounts that actually represent cash on
+  // hand or in the bank (the seeded chart's Cash/Bank accounts). Marks
+  // which accounts generateCashFlow treats as "cash" for its direct-method
+  // walk and for the dashboard's Cash Position figure — deliberately a
+  // flag rather than an inferred "name contains 'Cash'" check, since a
+  // custom account an org adds later has no name convention to rely on.
+  isCashEquivalent  Boolean            @default(false)
+  // Phase 11 — which of the Cash Flow Statement's three activity buckets
+  // this account's postings belong to when they're the *contra* side of a
+  // cash movement. Null for cash-equivalent accounts themselves (they
+  // don't classify against themselves) and for accounts that never touch
+  // cash directly. See ReportingService.generateCashFlow.
+  cashFlowCategory  CashFlowCategory?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lines              JournalEntryLine[]
+  expenseCategories  ExpenseCategory[]
+
+  @@unique([organizationId, code])
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("chart_of_accounts")
+}
+
+enum AccountingPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+model AccountingPeriod {
+  id             String                 @id @default(cuid())
+  organizationId String
+  // Calendar-month bucket — startDate is always the 1st, endDate the last
+  // instant of the month. See file header decision #5.
+  startDate      DateTime
+  endDate        DateTime
+  status         AccountingPeriodStatus @default(OPEN)
+  closedAt       DateTime?
+  closedByUserId String?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  closedBy       User?          @relation(fields: [closedByUserId], references: [id], onDelete: SetNull)
+  journalEntries JournalEntry[]
+
+  @@unique([organizationId, startDate])
+  @@index([organizationId])
+  @@map("accounting_periods")
+}
+
+enum JournalEntryStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+model JournalEntry {
+  id             String             @id @default(cuid())
+  organizationId String
+  // Nullable — most entries are branch-scoped (they come from a branch-
+  // scoped business event), but a manual org-level adjusting entry is a
+  // real case this build supports without forcing an arbitrary branch pick.
+  branchId       String?
+  periodId       String
+  entryDate      DateTime
+  description    String
+  // Loose link back to whatever business event produced this entry (an
+  // Order, a Reservation, a PurchaseOrder, a WasteRecord, an Expense) —
+  // same pattern as InventoryTransaction's referenceType/referenceId.
+  referenceType  String?
+  referenceId    String?
+  status         JournalEntryStatus @default(DRAFT)
+  // Set only on a reversal entry, pointing at the entry it reverses.
+  // @unique enforces "an entry may be reversed at most once" — you cannot
+  // reverse the same original twice.
+  reversalOfEntryId String?         @unique
+  postedAt          DateTime?
+  postedByUserId     String?
+  createdByUserId    String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  period       AccountingPeriod  @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  // Phase 15 hardening: was SetNull — deleting the original entry would
+  // have silently detached its reversal, breaking the reversal audit
+  // trail without any error. Journal entries are never hard-deleted by
+  // any code path today, but the DB constraint should say so, not just
+  // application convention.
+  reversalOf   JournalEntry?     @relation("JournalEntryReversal", fields: [reversalOfEntryId], references: [id], onDelete: Restrict)
+  reversedBy   JournalEntry?     @relation("JournalEntryReversal")
+  postedBy     User?             @relation("JournalEntryPostedBy", fields: [postedByUserId], references: [id], onDelete: SetNull)
+  createdBy    User?             @relation("JournalEntryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lines        JournalEntryLine[]
+  financialTransaction FinancialTransaction?
+  expense      Expense?
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([periodId])
+  @@index([referenceType, referenceId])
+  // Phase 15 hardening: AccountingService.listJournalEntries always filters
+  // by organizationId and sorts/range-filters by entryDate — no prior index
+  // covered entryDate at all, so that query fell back to a full org-scoped
+  // scan plus sort.
+  @@index([organizationId, entryDate])
+  @@map("journal_entries")
+}
+
+model JournalEntryLine {
+  id             String   @id @default(cuid())
+  journalEntryId String
+  accountId      String
+  // Exactly one of debit/credit is positive, the other is exactly 0 — a
+  // hand-written migration CHECK constraint enforces this at the database
+  // level (Prisma's schema DSL has no CHECK support, the same gap Phase 3/
+  // 4/8's CHECK constraints hit), backed by a matching Zod-layer bound.
+  debit          Decimal  @default(0) @db.Decimal(14, 2)
+  credit         Decimal  @default(0) @db.Decimal(14, 2)
+  description    String?
+
+  journalEntry JournalEntry   @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account      ChartOfAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([journalEntryId])
+  @@index([accountId])
+  @@map("journal_entry_lines")
+}
+
+enum FinancialTransactionType {
+  ORDER_REVENUE
+  ORDER_COGS
+  DEPOSIT_RECEIVED
+  DEPOSIT_REFUNDED
+  DEPOSIT_EARNED
+  INVENTORY_PURCHASE
+  INVENTORY_WASTE
+  EXPENSE_POSTED
+}
+
+model FinancialTransaction {
+  id             String                   @id @default(cuid())
+  organizationId String
+  branchId       String?
+  type           FinancialTransactionType
+  // What business event produced this posting — an Order, Reservation,
+  // CateringPayment, PurchaseOrder, WasteRecord, or Expense id.
+  referenceType  String
+  referenceId    String
+  journalEntryId String                   @unique
+  createdAt      DateTime                 @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+
+  // The idempotency guard — see file header decision #3.
+  @@unique([referenceType, referenceId, type])
+  @@index([organizationId])
+  @@map("financial_transactions")
+}
+
+model ExpenseCategory {
+  id               String   @id @default(cuid())
+  organizationId   String
+  name             String
+  // Which account an expense in this category posts to by default — see
+  // file header decision #6 (kept separate from the seeded chart's fixed
+  // account list so an org can add its own categories/accounts later).
+  defaultAccountId String?
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  defaultAccount ChartOfAccount? @relation(fields: [defaultAccountId], references: [id], onDelete: SetNull)
+  expenses       Expense[]
+
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX expense_categories_organizationId_name_active_key
+  // ON expense_categories ("organizationId", "name") WHERE (active);
+  @@index([organizationId])
+  @@map("expense_categories")
+}
+
+model Vendor {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  contactName    String?
+  email          String?
+  phone          String?
+  address        String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expenses     Expense[]
+
+  // Phase 15 hardening: partial unique index (WHERE active), hand-written
+  // in the migration SQL — see TableSection's comment (line ~352) for the
+  // full rationale. CREATE UNIQUE INDEX vendors_organizationId_name_active_key
+  // ON vendors ("organizationId", "name") WHERE (active);
+  @@index([organizationId])
+  @@map("vendors")
+}
+
+enum ExpenseApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Expense {
+  id             String                 @id @default(cuid())
+  organizationId String
+  branchId       String
+  vendorId       String?
+  categoryId     String
+  amount         Decimal                @db.Decimal(12, 2)
+  expenseDate    DateTime
+  // Reuses the existing OrderPaymentMethod enum — same "one enum, many
+  // tables" reasoning Phase 7's CateringPayment already established for
+  // OrderPaymentMethod/OrderPaymentStatus.
+  paymentMethod    OrderPaymentMethod
+  notes            String?
+  approvalStatus   ExpenseApprovalStatus @default(PENDING)
+  recordedByUserId String?
+  approvedByUserId String?
+  // Set only once APPROVED and posted — see AccountingService.approveExpense.
+  journalEntryId   String?               @unique
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  vendor       Vendor?             @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  category     ExpenseCategory     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  recordedBy   User?               @relation("ExpenseRecordedBy", fields: [recordedByUserId], references: [id], onDelete: SetNull)
+  approvedBy   User?               @relation("ExpenseApprovedBy", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  journalEntry JournalEntry?       @relation(fields: [journalEntryId], references: [id], onDelete: SetNull)
+  attachments  ExpenseAttachment[]
+
+   @@index([organizationId])
+  @@index([branchId, startAt])
+  @@index([customerUserId])
+  @@index([customerId])
+  @@map("reservations")
+}
+
+model ExpenseAttachment {
+  id               String   @id @default(cuid())
+  expenseId        String
+  fileName         String
+  // Metadata-only, same honest stub as the rest of this build's unconfigured
+  // integrations (STORAGE_PROVIDER_KEY is unset per .env.example) — no real
+  // file upload/storage exists yet, this records that a receipt exists and
+  // where it would live once storage is configured.
+  fileUrl          String
+  uploadedByUserId String?
+  createdAt        DateTime @default(now())
+
+  expense    Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  uploadedBy User?   @relation(fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([expenseId])
+  @@map("expense_attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — Notifications
+// ---------------------------------------------------------------------------
+
+// Master spec §40's own list, verbatim. Reminder-type entries
+// (RESERVATION_REMINDER/DEPOSIT_REMINDER/CATERING_REMINDER/PAYMENT_REMINDER)
+// are fully implemented as callable NotificationService methods but are not
+// wired to any automatic trigger in this build — see NotificationService's
+// class header for why (no scheduler/cron infrastructure exists in this
+// codebase; a real deployment would call these from a scheduled job).
+enum NotificationType {
+  RESERVATION_CONFIRMATION
+  RESERVATION_REMINDER
+  DEPOSIT_REMINDER
+  ORDER_CONFIRMATION
+  ORDER_STATUS
+  DELIVERY_UPDATE
+  CATERING_QUOTATION
+  CATERING_REMINDER
+  PAYMENT_REMINDER
+  INVOICE
+  REVIEW_REQUEST
+}
+
+// Master spec §40: "Support: Email, Push notifications, SMS if configured."
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+}
+
+enum NotificationStatus {
+  // Provider accepted the send request.
+  SENT
+  // Provider was configured but the send attempt itself failed —
+  // errorMessage carries the provider's error.
+  FAILED
+  // No provider is configured for this channel (lib/notifications/*Provider.ts
+  // — matches the "Integration requires configuration" convention every
+  // other unconfigured integration in this build follows).
+  SKIPPED_NOT_CONFIGURED
+  // A provider is configured, but the triggering record had no usable
+  // recipient for this channel (e.g. no email on file for an EMAIL attempt).
+  SKIPPED_NO_RECIPIENT
+}
+
+// One row per attempted send, one channel per row — a reservation
+// confirmation that goes out over both email and SMS produces two rows, not
+// one row with two statuses, so each channel's own delivery outcome is
+// independently queryable/auditable. Every row is written regardless of
+// outcome (including the two SKIPPED_* cases) — a silently-absent row would
+// be indistinguishable from "NotificationService was never called at all",
+// which defeats the point of having a notification history at all.
+model Notification {
+  id             String              @id @default(cuid())
+  organizationId String
+  branchId       String
+  type           NotificationType
+  channel        NotificationChannel
+  status         NotificationStatus
+
+  // Email address or phone number actually targeted; null for the
+  // SKIPPED_NO_RECIPIENT case, where there was nothing to target.
+  recipient String?
+  // Email only; null for SMS/PUSH.
+  subject   String?
+  body      String
+
+  // Loosely-typed link back to whatever triggered this notification
+  // (e.g. "Reservation/<id>", "Order/<id>") — deliberately not a set of
+  // nullable FK columns (one per possible entity type), the same
+  // AuditLog.entityType/entityId pattern this codebase already established
+  // in Phase 1 for exactly this "polymorphic reference" shape.
+  relatedEntityType String?
+  relatedEntityId   String?
+
+  // Opaque provider-assigned id, set only on SENT — mirrors
+  // PaymentIntentResult.providerReference's naming in lib/payments/PaymentProvider.ts.
+  providerReference String?
+  errorMessage      String?
+
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, type])
+  // Phase 15 hardening: replaced the old [organizationId, createdAt] index —
+  // every real call site (NotificationService.list) filters by
+  // organizationId AND branchId together, never organizationId alone, so a
+  // 3-column index serves that query directly while still covering any
+  // future organizationId-only lookup via the leftmost-prefix rule.
+  @@index([organizationId, branchId, createdAt])
+  @@index([relatedEntityType, relatedEntityId])
+  @@map("notifications")
+}

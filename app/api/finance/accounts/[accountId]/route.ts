@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { updateAccountSchema } from '@/lib/validation/accounting';
 import { AccountingService } from '@/services/accounting/AccountingService';
 
-export async function PATCH(request: NextRequest, { params }: { params: { accountId: string } }) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ accountId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.FINANCE_MANAGE);
     const body = await request.json();

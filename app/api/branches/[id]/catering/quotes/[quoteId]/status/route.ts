@@ -8,8 +8,9 @@ import { CateringService } from '@/services/catering/CateringService';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; quoteId: string } },
+  props: { params: Promise<{ id: string; quoteId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CATERING_MANAGE);
     const body = await request.json();

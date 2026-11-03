@@ -12,7 +12,8 @@ import { InventoryService } from '@/services/inventory/InventoryService';
  * 404 when none exists — the absence of a recipe is a normal, expected
  * state (most menu items may never get one), not an error.
  */
-export async function GET(request: NextRequest, { params }: { params: { menuItemId: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ menuItemId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const recipe = await InventoryService.getRecipeByMenuItem(session.organizationId, params.menuItemId);

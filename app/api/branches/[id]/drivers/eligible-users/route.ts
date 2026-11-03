@@ -5,7 +5,8 @@ import { PERMISSIONS } from '@/lib/auth/constants';
 import { toErrorResponse } from '@/lib/utils/api-error';
 import { DriverService } from '@/services/delivery/DriverService';
 
-export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     void params.id; // Branch is not part of the query — DRIVER-role users aren't branch-scoped.

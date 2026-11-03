@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { listDeliveriesQuerySchema } from '@/lib/validation/delivery';
 import { DeliveryService } from '@/services/delivery/DeliveryService';
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const { searchParams } = new URL(request.url);

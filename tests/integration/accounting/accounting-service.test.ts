@@ -37,7 +37,7 @@ describe('AccountingService — chart of accounts', () => {
   it('seeds the standard 30-account chart on organization registration', async () => {
     const { user } = await setupFixture('a');
     const accounts = await AccountingService.listAccounts(user.organizationId, {});
-    expect(accounts).toHaveLength(30);
+    expect(accounts).toHaveLength(31);
     const cash = accounts.find((a) => a.name === 'Cash')!;
     expect(cash.code).toBe('1000');
     expect(cash.type).toBe('ASSET');
@@ -51,7 +51,7 @@ describe('AccountingService — chart of accounts', () => {
     const { user } = await setupFixture('b');
     await prisma.$transaction((tx) => AccountingService.ensureChartOfAccounts(tx, user.organizationId));
     const accounts = await AccountingService.listAccounts(user.organizationId, {});
-    expect(accounts).toHaveLength(30);
+    expect(accounts).toHaveLength(31);
   });
 
   it('creates a custom (non-system) account', async () => {
@@ -153,9 +153,9 @@ describe('AccountingService — journal entries (manual path)', () => {
     expect(reversal.reversalOfEntryId).toBe(entry.id);
     const cashLine = reversal.lines.find((l) => l.accountId === cash.id)!;
     const equityLine = reversal.lines.find((l) => l.accountId === equity.id)!;
-    expect(cashLine.credit.toString()).toBe('750.00');
-    expect(cashLine.debit.toString()).toBe('0.00');
-    expect(equityLine.debit.toString()).toBe('750.00');
+    expect(cashLine.credit.toFixed(2)).toBe('750.00');
+    expect(cashLine.debit.toFixed(2)).toBe('0.00');
+    expect(equityLine.debit.toFixed(2)).toBe('750.00');
 
     const original = await AccountingService.getJournalEntry(user.organizationId, entry.id);
     expect(original.status).toBe('REVERSED');
@@ -217,7 +217,7 @@ describe('AccountingService — trial balance and accounting periods', () => {
     expect(trialBalance.totalDebits.toString()).toBe(trialBalance.totalCredits.toString());
 
     const cashRow = trialBalance.accounts.find((r) => r.name === 'Cash')!;
-    expect(cashRow.balance.toString()).toBe('700.00'); // 1000 debit - 300 credit, Cash is normally DEBIT
+    expect(cashRow.balance.toFixed(2)).toBe('700.00'); // 1000 debit - 300 credit, Cash is normally DEBIT
   });
 
   it('a DRAFT entry excludes itself from the trial balance (only POSTED entries count)', async () => {
@@ -229,7 +229,7 @@ describe('AccountingService — trial balance and accounting periods', () => {
       user.id,
     );
     const trialBalance = await AccountingService.generateTrialBalance(user.organizationId);
-    expect(trialBalance.totalDebits.toString()).toBe('0.00');
+    expect(trialBalance.totalDebits.toFixed(2)).toBe('0.00');
   });
 
   it('refuses to close a period that still has a DRAFT entry dated inside it', async () => {
@@ -311,8 +311,8 @@ describe('AccountingService — vendors, expense categories, and expense approva
     expect(entry.status).toBe('POSTED');
     const rentLine = entry.lines.find((l) => l.accountId === rent.id)!;
     const cashLine = entry.lines.find((l) => l.accountId === cash.id)!;
-    expect(rentLine.debit.toString()).toBe('5000.00');
-    expect(cashLine.credit.toString()).toBe('5000.00');
+    expect(rentLine.debit.toFixed(2)).toBe('5000.00');
+    expect(cashLine.credit.toFixed(2)).toBe('5000.00');
 
     await expect(AccountingService.approveExpense(user.organizationId, branch.id, expense.id, user.id)).rejects.toBeInstanceOf(ConflictError);
   });

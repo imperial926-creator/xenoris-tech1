@@ -45,11 +45,15 @@ describe('multi-tenant isolation', () => {
 
     const branchesForA = await BranchService.list(orgA.user.organizationId);
     expect(branchesForA).toHaveLength(1);
-    expect(branchesForA[0].name).toBe('A Branch 1');
+    const branchForA = branchesForA[0];
+    if (!branchForA) throw new Error('Expected one branch for organization A');
+    expect(branchForA.name).toBe('A Branch 1');
 
     const branchesForB = await BranchService.list(orgB.user.organizationId);
     expect(branchesForB).toHaveLength(1);
-    expect(branchesForB[0].name).toBe('B Branch 1');
+    const branchForB = branchesForB[0];
+    if (!branchForB) throw new Error('Expected one branch for organization B');
+    expect(branchForB.name).toBe('B Branch 1');
   });
 
   it('throws NotFoundError when fetching a branch by id under the wrong organization', async () => {
@@ -83,8 +87,10 @@ describe('multi-tenant isolation', () => {
       where: { entityType: 'Branch', entityId: branch.id },
     });
     expect(logs).toHaveLength(1);
-    expect(logs[0].action).toBe('branch.create');
-    expect(logs[0].organizationId).toBe(orgA.user.organizationId);
+    const firstAuditLog = logs[0];
+    if (!firstAuditLog) throw new Error('Expected one branch audit log');
+    expect(firstAuditLog.action).toBe('branch.create');
+    expect(firstAuditLog.organizationId).toBe(orgA.user.organizationId);
   });
 
   it('updating an organization only ever touches that organization', async () => {

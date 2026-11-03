@@ -7,8 +7,9 @@ import { CateringService } from '@/services/catering/CateringService';
 
 export async function POST(
   _request: NextRequest,
-  { params }: { params: { id: string; inquiryId: string } },
+  props: { params: Promise<{ id: string; inquiryId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CATERING_MANAGE);
     const inquiry = await CateringService.cancelInquiry(session.organizationId, params.id, params.inquiryId, session.userId);

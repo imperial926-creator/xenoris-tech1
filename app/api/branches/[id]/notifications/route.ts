@@ -12,7 +12,8 @@ import { NotificationService } from '@/services/notifications/NotificationServic
  * (see NotificationService's class header), never directly through this
  * route.
  */
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.NOTIFICATION_VIEW);
     const { searchParams } = new URL(request.url);

@@ -100,7 +100,9 @@ describe('log', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     log.error('Something failed', new Error('boom'), { userId: 'u1', password: 'hunter2' });
     expect(spy).toHaveBeenCalledTimes(1);
-    const line = spy.mock.calls[0][0] as string;
+    const firstCall = spy.mock.calls[0];
+    if (!firstCall) throw new Error('Expected one console.error call');
+    const line = firstCall[0] as string;
     const parsed = JSON.parse(line);
     expect(parsed.level).toBe('error');
     expect(parsed.message).toBe('Something failed');

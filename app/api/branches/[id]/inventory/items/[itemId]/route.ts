@@ -6,7 +6,11 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { updateInventoryItemSchema } from '@/lib/validation/inventory';
 import { InventoryService } from '@/services/inventory/InventoryService';
 
-export async function GET(request: NextRequest, { params }: { params: { id: string; itemId: string } }) {
+export async function GET(
+  request: NextRequest,
+  props: { params: Promise<{ id: string; itemId: string }> }
+) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const item = await InventoryService.getInventoryItem(session.organizationId, params.id, params.itemId);
@@ -16,7 +20,11 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
   }
 }
 
-export async function PATCH(request: NextRequest, { params }: { params: { id: string; itemId: string } }) {
+export async function PATCH(
+  request: NextRequest,
+  props: { params: Promise<{ id: string; itemId: string }> }
+) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const body = await request.json();

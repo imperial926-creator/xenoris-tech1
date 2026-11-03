@@ -12,7 +12,11 @@ import { InventoryService } from '@/services/inventory/InventoryService';
  * so this can be called more than once as staff work through a physical
  * count in batches. See InventoryService.completeStockCount.
  */
-export async function POST(request: NextRequest, { params }: { params: { id: string; countId: string } }) {
+export async function POST(
+  request: NextRequest,
+  props: { params: Promise<{ id: string; countId: string }> }
+) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const body = await request.json();

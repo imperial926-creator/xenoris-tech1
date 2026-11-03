@@ -1,0 +1,544 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { prisma } from '@/lib/db/prisma';
+import { AuthService } from '@/services/auth/AuthService';
+import { BranchService } from '@/services/branches/BranchService';
+import { MenuService } from '@/services/menu/MenuService';
+import { OrderService } from '@/services/orders/OrderService';
+import { InventoryService } from '@/services/inventory/InventoryService';
+import { resetDatabase } from '../../helpers/db';
+import { ConflictError, NotFoundError } from '@/lib/utils/api-error';
+
+async function setupFixture(suffix: string) {
+  const { user } = await AuthService.register({
+    organizationName: `Inventory Test ${suffix}`,
+    organizationEmail: `inventory-test-${suffix}@test.local`,
+    firstName: 'Owner',
+    lastName: suffix,
+    email: `owner@inventory-test-${suffix}.local`,
+    password: 'SuperSecret123!',
+    currency: 'PHP',
+    timezone: 'Asia/Manila',
+  });
+  const branchA = await BranchService.create(user.organizationId, { name: `Branch A ${suffix}`, timezone: 'Asia/Manila' }, user.id);
+  const branchB = await BranchService.create(user.organizationId, { name: `Branch B ${suffix}`, timezone: 'Asia/Manila' }, user.id);
+  const category = await MenuService.createCategory(user.organizationId, { name: 'Mains', displayOrder: 0 }, user.id);
+  const menuItem = await MenuService.createItem(
+    user.organizationId,
+    { categoryId: category.id, name: 'Chicken Inasal Meal', price: '220.00', available: true, taxCategory: 'STANDARD' },
+    user.id,
+  );
+  const kilogram = await InventoryService.createUnit(user.organizationId, { name: 'Kilogram', abbreviation: 'kg' }, user.id);
+  const gram = await InventoryService.createUnit(
+    user.organizationId,
+    { name: 'Gram', abbreviation: 'g', baseUnitId: kilogram.id, conversionFactor: '1000' },
+    user.id,
+  );
+  const chicken = await InventoryService.createIngredient(
+    user.organizationId,
+    { name: 'Chicken', stockUnitId: kilogram.id, costPerUnit: '180.00' },
+    user.id,
+  );
+  return { user, branchA, branchB, category, menuItem, kilogram, gram, chicken };
+}
+
+describe('InventoryService — units, ingredients, recipes', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('creates a base unit and a derived unit pointed at it', async () => {
+    const { gram, kilogram } = await setupFixture('a');
+    expect(gram.baseUnitId).toBe(kilogram.id);
+    expect(gram.conversionFactor.toString()).toBe('1000');
+  });
+
+  it('rejects a two-level unit chain (deriving a unit from an already-derived unit)', async () => {
+    const { user, gram } = await setupFixture('a2');
+    await expect(
+      InventoryService.createUnit(user.organizationId, { name: 'Milligram', abbreviation: 'mg', baseUnitId: gram.id, conversionFactor: '1000' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('enforces tenant isolation on ingredients', async () => {
+    const orgA = await setupFixture('b');
+    const orgB = await setupFixture('c');
+    await expect(InventoryService.getIngredient(orgB.user.organizationId, orgA.chicken.id)).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('creates a recipe linking a menu item to its ingredients', async () => {
+    const { user, menuItem, chicken, gram } = await setupFixture('d');
+    const rice = await InventoryService.createIngredient(user.organizationId, { name: 'Rice', stockUnitId: gram.id, costPerUnit: '0.045' }, user.id);
+    const recipe = await InventoryService.createRecipe(
+      user.organizationId,
+      {
+        menuItemId: menuItem.id,
+        yieldQuantity: '1',
+        items: [
+          { ingredientId: chicken.id, quantity: '200', unitId: gram.id },
+          { ingredientId: rice.id, quantity: '250', unitId: gram.id },
+        ],
+      },
+      user.id,
+    );
+    expect(recipe.items).toHaveLength(2);
+  });
+
+  it('rejects a recipe with the same ingredient listed twice', async () => {
+    const { user, menuItem, chicken, gram } = await setupFixture('e');
+    await expect(
+      InventoryService.createRecipe(
+        user.organizationId,
+        {
+          menuItemId: menuItem.id,
+          yieldQuantity: '1',
+          items: [
+            { ingredientId: chicken.id, quantity: '100', unitId: gram.id },
+            { ingredientId: chicken.id, quantity: '50', unitId: gram.id },
+          ],
+        },
+        user.id,
+      ),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('rejects a second recipe for a menu item that already has one', async () => {
+    const { user, menuItem, chicken, gram } = await setupFixture('f');
+    await InventoryService.createRecipe(user.organizationId, { menuItemId: menuItem.id, yieldQuantity: '1', items: [{ ingredientId: chicken.id, quantity: '100', unitId: gram.id }] }, user.id);
+    await expect(
+      InventoryService.createRecipe(user.organizationId, { menuItemId: menuItem.id, yieldQuantity: '1', items: [{ ingredientId: chicken.id, quantity: '50', unitId: gram.id }] }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+});
+
+describe('InventoryService — stock lines, adjustments, waste, transfers', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('creates an inventory item with a guaranteed initial ADJUSTMENT transaction, even for a zero starting balance', async () => {
+    const { user, branchA, chicken } = await setupFixture('g');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '0' }, user.id);
+    expect(item.quantityOnHand.toString()).toBe('0');
+    const txns = await prisma.inventoryTransaction.findMany({ where: { inventoryItemId: item.id } });
+    expect(txns).toHaveLength(1);
+    const adjustmentTxn = txns[0];
+    if (!adjustmentTxn) throw new Error('Expected an adjustment transaction');
+    expect(adjustmentTxn.type).toBe('ADJUSTMENT');
+    expect(adjustmentTxn.quantityAfter.toString()).toBe('0');
+  });
+
+  it('rejects a second inventory item for the same (branch, ingredient) pair', async () => {
+    const { user, branchA, chicken } = await setupFixture('h');
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '10' }, user.id);
+    await expect(
+      InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '5' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('rejects criticalPoint set higher than reorderPoint', async () => {
+    const { user, branchA, chicken } = await setupFixture('i');
+    await expect(
+      InventoryService.createInventoryItem(
+        user.organizationId, branchA.id,
+        { ingredientId: chicken.id, initialQuantity: '10', reorderPoint: '5', criticalPoint: '8' },
+        user.id,
+      ),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('records a positive and a negative adjustment with an exact running balance', async () => {
+    const { user, branchA, chicken } = await setupFixture('j');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '25' }, user.id);
+
+    const first = await InventoryService.recordAdjustment(user.organizationId, branchA.id, item.id, { type: 'ADJUSTMENT', quantityDelta: '10', reason: 'Found extra stock' }, user.id);
+    expect(first.quantityAfter.toString()).toBe('35');
+
+    const second = await InventoryService.recordAdjustment(user.organizationId, branchA.id, item.id, { type: 'RETURN', quantityDelta: '-3', reason: 'Returned to supplier' }, user.id);
+    expect(second.quantityAfter.toString()).toBe('32');
+
+    const refreshed = await InventoryService.getInventoryItem(user.organizationId, branchA.id, item.id);
+    expect(refreshed.quantityOnHand.toString()).toBe('32');
+  });
+
+  it('allows quantityOnHand to go negative from an adjustment (never blocks the ledger)', async () => {
+    const { user, branchA, chicken } = await setupFixture('k');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '5' }, user.id);
+    const txn = await InventoryService.recordAdjustment(user.organizationId, branchA.id, item.id, { type: 'ADJUSTMENT', quantityDelta: '-20', reason: 'Correction' }, user.id);
+    expect(txn.quantityAfter.toString()).toBe('-15');
+  });
+
+  it('records waste, decrementing stock and stamping the unit cost at time of waste', async () => {
+    const { user, branchA, chicken } = await setupFixture('l');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '10' }, user.id);
+    const waste = await InventoryService.recordWaste(user.organizationId, branchA.id, item.id, { quantity: '1.5', reason: 'Dropped on floor' }, user.id);
+    expect(waste.quantity.toString()).toBe('1.5');
+
+    const txns = await prisma.inventoryTransaction.findMany({ where: { inventoryItemId: item.id, type: 'WASTE' } });
+    expect(txns).toHaveLength(1);
+    const wasteTxn = txns[0];
+    if (!wasteTxn) throw new Error('Expected a waste transaction');
+    expect(wasteTxn.quantityDelta.toString()).toBe('-1.5');
+    expect(wasteTxn.quantityAfter.toString()).toBe('8.5');
+    expect(wasteTxn.unitCostAtTime?.toString()).toBe('180');
+  });
+
+  it('transfers stock between branches, decrementing the source and incrementing (auto-creating) the destination', async () => {
+    const { user, branchA, branchB, chicken } = await setupFixture('m');
+    const source = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '20' }, user.id);
+
+    const { outbound, inbound } = await InventoryService.transferStock(user.organizationId, branchA.id, { toBranchId: branchB.id, ingredientId: chicken.id, quantity: '8' }, user.id);
+    expect(outbound.quantityAfter.toString()).toBe('12');
+    expect(inbound.quantityAfter.toString()).toBe('8');
+
+    const refreshedSource = await InventoryService.getInventoryItem(user.organizationId, branchA.id, source.id);
+    expect(refreshedSource.quantityOnHand.toString()).toBe('12');
+    const destination = await prisma.inventoryItem.findUnique({ where: { branchId_ingredientId: { branchId: branchB.id, ingredientId: chicken.id } } });
+    expect(destination?.quantityOnHand.toString()).toBe('8');
+  });
+
+  it('rejects a transfer that exceeds the source branch\'s available stock — unlike consumption/waste/adjustment, this one refuses rather than going negative', async () => {
+    const { user, branchA, branchB, chicken } = await setupFixture('n');
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '5' }, user.id);
+    await expect(
+      InventoryService.transferStock(user.organizationId, branchA.id, { toBranchId: branchB.id, ingredientId: chicken.id, quantity: '10' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('rejects transferring to the same branch', async () => {
+    const { user, branchA, chicken } = await setupFixture('o');
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '5' }, user.id);
+    await expect(
+      InventoryService.transferStock(user.organizationId, branchA.id, { toBranchId: branchA.id, ingredientId: chicken.id, quantity: '1' }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+});
+
+describe('InventoryService — purchase orders', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  async function setupSupplier(organizationId: string, userId: string) {
+    return InventoryService.createSupplier(organizationId, { name: 'Manila Fresh Poultry' }, userId);
+  }
+
+  it('computes exact line totals and the PO total on create', async () => {
+    const { user, branchA, chicken, kilogram } = await setupFixture('p');
+    const supplier = await setupSupplier(user.organizationId, user.id);
+    const po = await InventoryService.createPurchaseOrder(
+      user.organizationId, branchA.id,
+      { supplierId: supplier.id, items: [{ ingredientId: chicken.id, unitId: kilogram.id, quantityOrdered: '10', unitCost: '190.00' }] },
+      user.id,
+    );
+    expect(po.status).toBe('DRAFT');
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
+    expect(poItem.lineTotal.toString()).toBe('1900.00');
+    expect(po.total.toString()).toBe('1900.00');
+  });
+
+  it('rejects submitting a non-DRAFT purchase order', async () => {
+    const { user, branchA, chicken, kilogram } = await setupFixture('q');
+    const supplier = await setupSupplier(user.organizationId, user.id);
+    const po = await InventoryService.createPurchaseOrder(
+      user.organizationId, branchA.id,
+      { supplierId: supplier.id, items: [{ ingredientId: chicken.id, unitId: kilogram.id, quantityOrdered: '10', unitCost: '190.00' }] },
+      user.id,
+    );
+    await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
+    await expect(InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('receives a PO ordered in a different unit than the ingredient stock unit, converting quantity and deriving cost-per-stock-unit', async () => {
+    // Chicken's stock unit is kg; order 2000g @ ₱0.19/g = ₱380.00. Received
+    // in full: convertedQty = 2000g -> 2kg, costPerStockUnit = 380 / 2 = 190/kg.
+    const { user, branchA, chicken, gram } = await setupFixture('r');
+    const supplier = await setupSupplier(user.organizationId, user.id);
+    const po = await InventoryService.createPurchaseOrder(
+      user.organizationId, branchA.id,
+      { supplierId: supplier.id, items: [{ ingredientId: chicken.id, unitId: gram.id, quantityOrdered: '2000', unitCost: '0.19' }] },
+      user.id,
+    );
+    await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
+    const received = await InventoryService.receivePurchaseOrderItems(
+      user.organizationId, branchA.id, po.id,
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '2000' }] },
+      user.id,
+    );
+    expect(received.status).toBe('RECEIVED');
+
+    const inventoryItem = await prisma.inventoryItem.findUnique({ where: { branchId_ingredientId: { branchId: branchA.id, ingredientId: chicken.id } } });
+    expect(inventoryItem?.quantityOnHand.toString()).toBe('2');
+
+    const txn = await prisma.inventoryTransaction.findFirst({ where: { inventoryItemId: inventoryItem!.id, type: 'PURCHASE' } });
+    expect(txn?.quantityDelta.toString()).toBe('2');
+    expect(txn?.unitCostAtTime?.toString()).toBe('190');
+
+    // Last purchase cost wins.
+    const updatedIngredient = await InventoryService.getIngredient(user.organizationId, chicken.id);
+    expect(updatedIngredient.costPerUnit.toString()).toBe('190');
+  });
+
+  it('supports partial receiving — status moves to PARTIALLY_RECEIVED and a later receipt completes it', async () => {
+    const { user, branchA, chicken, kilogram } = await setupFixture('s');
+    const supplier = await setupSupplier(user.organizationId, user.id);
+    const po = await InventoryService.createPurchaseOrder(
+      user.organizationId, branchA.id,
+      { supplierId: supplier.id, items: [{ ingredientId: chicken.id, unitId: kilogram.id, quantityOrdered: '10', unitCost: '190.00' }] },
+      user.id,
+    );
+    await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
+
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
+    const partial = await InventoryService.receivePurchaseOrderItems(
+      user.organizationId, branchA.id, po.id,
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '6' }] },
+      user.id,
+    );
+    expect(partial.status).toBe('PARTIALLY_RECEIVED');
+
+    const inventoryItemAfterPartial = await prisma.inventoryItem.findUnique({ where: { branchId_ingredientId: { branchId: branchA.id, ingredientId: chicken.id } } });
+    expect(inventoryItemAfterPartial?.quantityOnHand.toString()).toBe('6');
+
+    const complete = await InventoryService.receivePurchaseOrderItems(
+      user.organizationId, branchA.id, po.id,
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '4' }] },
+      user.id,
+    );
+    expect(complete.status).toBe('RECEIVED');
+    const inventoryItemAfterFull = await prisma.inventoryItem.findUnique({ where: { branchId_ingredientId: { branchId: branchA.id, ingredientId: chicken.id } } });
+    expect(inventoryItemAfterFull?.quantityOnHand.toString()).toBe('10');
+  });
+
+  it('rejects receiving more than the remaining unreceived quantity', async () => {
+    const { user, branchA, chicken, kilogram } = await setupFixture('t');
+    const supplier = await setupSupplier(user.organizationId, user.id);
+    const po = await InventoryService.createPurchaseOrder(
+      user.organizationId, branchA.id,
+      { supplierId: supplier.id, items: [{ ingredientId: chicken.id, unitId: kilogram.id, quantityOrdered: '10', unitCost: '190.00' }] },
+      user.id,
+    );
+    await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
+    await expect(
+      InventoryService.receivePurchaseOrderItems(user.organizationId, branchA.id, po.id, { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '11' }] }, user.id),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('cancels a DRAFT purchase order with a reason', async () => {
+    const { user, branchA, chicken, kilogram } = await setupFixture('u');
+    const supplier = await setupSupplier(user.organizationId, user.id);
+    const po = await InventoryService.createPurchaseOrder(
+      user.organizationId, branchA.id,
+      { supplierId: supplier.id, items: [{ ingredientId: chicken.id, unitId: kilogram.id, quantityOrdered: '10', unitCost: '190.00' }] },
+      user.id,
+    );
+    const cancelled = await InventoryService.cancelPurchaseOrder(user.organizationId, branchA.id, po.id, { cancellationReason: 'Supplier out of stock' }, user.id);
+    expect(cancelled.status).toBe('CANCELLED');
+  });
+});
+
+describe('InventoryService — stock counts', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('snapshots current quantityOnHand as expectedQuantity when a count is opened', async () => {
+    const { user, branchA, chicken } = await setupFixture('v');
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '50' }, user.id);
+    const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
+    expect(count.items).toHaveLength(1);
+    const countItem = count.items[0];
+    if (!countItem) throw new Error('Expected a stock-count item');
+    expect(countItem.expectedQuantity.toString()).toBe('50');
+    expect(count.status).toBe('OPEN');
+  });
+
+  it('bases the COUNT_CORRECTION on the CURRENT quantityOnHand at completion time, not the stale open-time snapshot', async () => {
+    const { user, branchA, chicken } = await setupFixture('w');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '50' }, user.id);
+    const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
+    const countItem = count.items[0];
+    if (!countItem) throw new Error('Expected a stock-count item');
+    expect(countItem.expectedQuantity.toString()).toBe('50');
+
+    // Something happens to the shelf DURING the counting window — a sale
+    // consumes 5kg after the count snapshot was taken but before it's
+    // completed. The ledger's quantityOnHand is now 45, even though the
+    // count's expectedQuantity snapshot still says 50.
+    await InventoryService.recordAdjustment(user.organizationId, branchA.id, item.id, { type: 'ADJUSTMENT', quantityDelta: '-5', reason: 'Simulated sale during count window' }, user.id);
+
+    // Staff physically counts 44kg on the shelf.
+    const completed = await InventoryService.completeStockCount(
+      user.organizationId, branchA.id, count.id,
+      { items: [{ inventoryItemId: item.id, countedQuantity: '44' }] },
+      user.id,
+    );
+    expect(completed.status).toBe('COMPLETED');
+
+    // Correction must be counted(44) - current(45) = -1, NOT counted(44) - expected(50) = -6.
+    const correction = await prisma.inventoryTransaction.findFirst({ where: { inventoryItemId: item.id, type: 'COUNT_CORRECTION' } });
+    expect(correction?.quantityDelta.toString()).toBe('-1');
+    expect(correction?.quantityAfter.toString()).toBe('44');
+
+    const refreshed = await InventoryService.getInventoryItem(user.organizationId, branchA.id, item.id);
+    expect(refreshed.quantityOnHand.toString()).toBe('44');
+  });
+
+  it('does not write a COUNT_CORRECTION when the counted quantity matches the current balance exactly', async () => {
+    const { user, branchA, chicken } = await setupFixture('x');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '20' }, user.id);
+    const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
+    await InventoryService.completeStockCount(user.organizationId, branchA.id, count.id, { items: [{ inventoryItemId: item.id, countedQuantity: '20' }] }, user.id);
+    const correction = await prisma.inventoryTransaction.findFirst({ where: { inventoryItemId: item.id, type: 'COUNT_CORRECTION' } });
+    expect(correction).toBeNull();
+  });
+
+  it('leaves a stock count OPEN until every line has been counted', async () => {
+    const { user, branchA, chicken, gram } = await setupFixture('y');
+    const rice = await InventoryService.createIngredient(user.organizationId, { name: 'Rice', stockUnitId: gram.id }, user.id);
+    const chickenItem = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '10' }, user.id);
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: rice.id, initialQuantity: '5000' }, user.id);
+    const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
+    expect(count.items).toHaveLength(2);
+
+    const partial = await InventoryService.completeStockCount(user.organizationId, branchA.id, count.id, { items: [{ inventoryItemId: chickenItem.id, countedQuantity: '10' }] }, user.id);
+    expect(partial.status).toBe('OPEN');
+  });
+
+  it('rejects cancelling a stock count that is not OPEN', async () => {
+    const { user, branchA, chicken } = await setupFixture('z');
+    const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '10' }, user.id);
+    const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
+    await InventoryService.completeStockCount(user.organizationId, branchA.id, count.id, { items: [{ inventoryItemId: item.id, countedQuantity: '10' }] }, user.id);
+    await expect(InventoryService.cancelStockCount(user.organizationId, branchA.id, count.id, user.id)).rejects.toBeInstanceOf(ConflictError);
+  });
+});
+
+describe('InventoryService — recipe-based consumption on order completion + COGS', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('consumes recipe ingredients (with unit conversion) only once an order reaches COMPLETED, and getCogsForOrder sums the real ingredient cost', async () => {
+    const { user, branchA, menuItem, chicken, gram } = await setupFixture('aa');
+    await InventoryService.createRecipe(user.organizationId, { menuItemId: menuItem.id, yieldQuantity: '1', items: [{ ingredientId: chicken.id, quantity: '200', unitId: gram.id }] }, user.id);
+    // Chicken's stock unit is kg; recipe is written in grams — this order
+    // completion has to convert 200g/unit through convertQuantity.
+    const stockItem = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '5' }, user.id);
+
+    const order = await OrderService.createOrder(
+      user.organizationId, branchA.id,
+      { type: 'TAKEOUT', discountAmount: '0.00', items: [{ menuItemId: menuItem.id, quantity: 2, modifierIds: [] }] },
+      user.id,
+    );
+
+    // Not consumed yet — only on COMPLETED.
+    const beforeCompletion = await InventoryService.getInventoryItem(user.organizationId, branchA.id, stockItem.id);
+    expect(beforeCompletion.quantityOnHand.toString()).toBe('5');
+
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'CONFIRMED' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'PREPARING' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'READY' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'COMPLETED' }, user.id);
+
+    // 2 orders x 200g / yield 1 = 400g = 0.4kg consumed. 5 - 0.4 = 4.6kg.
+    const afterCompletion = await InventoryService.getInventoryItem(user.organizationId, branchA.id, stockItem.id);
+    expect(afterCompletion.quantityOnHand.toString()).toBe('4.6');
+
+    const consumptionTxn = await prisma.inventoryTransaction.findFirst({ where: { inventoryItemId: stockItem.id, type: 'SALE_CONSUMPTION' } });
+    expect(consumptionTxn?.quantityDelta.toString()).toBe('-0.4');
+    expect(consumptionTxn?.referenceType).toBe('Order');
+    expect(consumptionTxn?.referenceId).toBe(order.id);
+
+    // COGS = 0.4kg x ₱180.00/kg = ₱72.00.
+    const cogs = await InventoryService.getCogsForOrder(user.organizationId, branchA.id, order.id);
+    expect(cogs.toFixed(2)).toBe('72.00');
+  });
+
+  it('silently skips consumption for an order item whose menu item has no recipe (never blocks order completion)', async () => {
+    const { user, branchA, category } = await setupFixture('bb');
+    const plainItem = await MenuService.createItem(user.organizationId, { categoryId: category.id, name: 'Bottled Water', price: '40.00', available: true, taxCategory: 'STANDARD' }, user.id);
+    const order = await OrderService.createOrder(user.organizationId, branchA.id, { type: 'TAKEOUT', discountAmount: '0.00', items: [{ menuItemId: plainItem.id, quantity: 1, modifierIds: [] }] }, user.id);
+
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'CONFIRMED' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'PREPARING' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'READY' }, user.id);
+    const completed = await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'COMPLETED' }, user.id);
+    expect(completed.status).toBe('COMPLETED');
+
+    const cogs = await InventoryService.getCogsForOrder(user.organizationId, branchA.id, order.id);
+    expect(cogs.toFixed(2)).toBe('0.00');
+  });
+
+  it('silently skips consumption when the recipe ingredient has no InventoryItem at that branch', async () => {
+    const { user, branchA, menuItem, chicken, gram } = await setupFixture('cc');
+    await InventoryService.createRecipe(user.organizationId, { menuItemId: menuItem.id, yieldQuantity: '1', items: [{ ingredientId: chicken.id, quantity: '200', unitId: gram.id }] }, user.id);
+    // Deliberately no InventoryItem created for chicken at branchA.
+    const order = await OrderService.createOrder(user.organizationId, branchA.id, { type: 'TAKEOUT', discountAmount: '0.00', items: [{ menuItemId: menuItem.id, quantity: 1, modifierIds: [] }] }, user.id);
+
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'CONFIRMED' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'PREPARING' }, user.id);
+    await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'READY' }, user.id);
+    const completed = await OrderService.updateStatus(user.organizationId, branchA.id, order.id, { status: 'COMPLETED' }, user.id);
+    expect(completed.status).toBe('COMPLETED');
+  });
+});
+
+describe('InventoryService — low stock', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('flags an item at or below its reorder point as LOW, and at or below its critical point as CRITICAL', async () => {
+    const { user, branchA, chicken, gram } = await setupFixture('dd');
+    const rice = await InventoryService.createIngredient(user.organizationId, { name: 'Rice', stockUnitId: gram.id }, user.id);
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '8', reorderPoint: '10', criticalPoint: '5' }, user.id);
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: rice.id, initialQuantity: '3', reorderPoint: '10', criticalPoint: '5' }, user.id);
+
+    const lowStock = await InventoryService.getLowStockItems(user.organizationId, branchA.id);
+    expect(lowStock).toHaveLength(2);
+    const chickenLine = lowStock.find((i) => i.ingredientId === chicken.id);
+    const riceLine = lowStock.find((i) => i.ingredientId === rice.id);
+    expect(chickenLine?.stockLevel).toBe('LOW');
+    expect(riceLine?.stockLevel).toBe('CRITICAL');
+
+    const count = await InventoryService.getLowStockCount(user.organizationId);
+    expect(count).toBe(2);
+  });
+
+  it('does not count an item with no threshold set as low stock', async () => {
+    const { user, branchA, chicken } = await setupFixture('ee');
+    await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '0' }, user.id);
+    const count = await InventoryService.getLowStockCount(user.organizationId);
+    expect(count).toBe(0);
+  });
+});

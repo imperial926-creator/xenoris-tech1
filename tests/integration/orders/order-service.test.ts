@@ -64,11 +64,16 @@ describe('OrderService', () => {
     );
 
     // 2x (150.00 base + 20.00 modifier) = 340.00 subtotal, 12% VAT = 40.80
-    expect(order.subtotal.toString()).toBe('340.00');
-    expect(order.taxTotal.toString()).toBe('40.80');
-    expect(order.total.toString()).toBe('380.80');
-    expect(order.items[0].nameSnapshot).toBe('Burger');
-    expect(order.items[0].modifiers[0].nameSnapshot).toBe('Cheese');
+    expect(order.subtotal.toFixed(2)).toBe('340.00');
+    expect(order.taxTotal.toFixed(2)).toBe('40.80');
+    expect(order.total.toFixed(2)).toBe('380.80');
+    const firstOrderItem = order.items[0];
+    if (!firstOrderItem) throw new Error('Expected the Burger order item');
+    expect(firstOrderItem.nameSnapshot).toBe('Burger');
+
+    const firstOrderModifier = firstOrderItem.modifiers[0];
+    if (!firstOrderModifier) throw new Error('Expected the Cheese modifier');
+    expect(firstOrderModifier.nameSnapshot).toBe('Cheese');
   });
 
   it('prices a variant using the variant price, not the base item price', async () => {
@@ -79,7 +84,7 @@ describe('OrderService', () => {
       { type: 'TAKEOUT', discountAmount: '0.00', items: [{ menuItemId: item.id, menuItemVariantId: variant.id, quantity: 1, modifierIds: [] }] },
       user.id,
     );
-    expect(order.subtotal.toString()).toBe('180.00');
+    expect(order.subtotal.toFixed(2)).toBe('180.00');
   });
 
   it('rejects a menu item from another organization', async () => {

@@ -11,7 +11,8 @@ import { AccountingService } from '@/services/accounting/AccountingService';
  * brand-new POSTED entry with every line's debit/credit swapped, and flips
  * the original's status to REVERSED. See AccountingService.reverseJournalEntry.
  */
-export async function POST(request: NextRequest, { params }: { params: { entryId: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ entryId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.FINANCE_MANAGE);
     const body = await request.json();

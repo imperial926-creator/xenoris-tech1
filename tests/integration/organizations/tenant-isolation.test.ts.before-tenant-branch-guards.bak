@@ -1,0 +1,105 @@
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { prisma } from '@/lib/db/prisma';
+import { AuthService } from '@/services/auth/AuthService';
+import { BranchService } from '@/services/branches/BranchService';
+import { OrganizationService } from '@/services/organizations/OrganizationService';
+import { resetDatabase } from '../../helpers/db';
+import { NotFoundError } from '@/lib/utils/api-error';
+
+async function registerOrg(suffix: string) {
+  return AuthService.register({
+    organizationName: `Org ${suffix}`,
+    organizationEmail: `org-${suffix}@tenant-test.local`,
+    firstName: 'Owner',
+    lastName: suffix,
+    email: `owner@org-${suffix}.local`,
+    password: 'SuperSecret123!',
+    currency: 'PHP',
+    timezone: 'Asia/Manila',
+  });
+}
+
+describe('multi-tenant isolation', () => {
+  beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it('does not return branches from another organization', async () => {
+    const orgA = await registerOrg('a');
+    const orgB = await registerOrg('b');
+
+    await BranchService.create(
+      orgA.user.organizationId,
+      { name: 'A Branch 1', timezone: 'Asia/Manila' },
+      orgA.user.id,
+    );
+    await BranchService.create(
+      orgB.user.organizationId,
+      { name: 'B Branch 1', timezone: 'Asia/Manila' },
+      orgB.user.id,
+    );
+
+    const branchesForA = await BranchService.list(orgA.user.organizationId);
+    expect(branchesForA).toHaveLength(1);
+    expect(branchesForA[0].name).toBe('A Branch 1');
+
+    const branchesForB = await BranchService.list(orgB.user.organizationId);
+    expect(branchesForB).toHaveLength(1);
+    expect(branchesForB[0].name).toBe('B Branch 1');
+  });
+
+  it('throws NotFoundError when fetching a branch by id under the wrong organization', async () => {
+    const orgA = await registerOrg('c');
+    const orgB = await registerOrg('d');
+
+    const branch = await BranchService.create(
+      orgA.user.organizationId,
+      { name: 'A Branch', timezone: 'Asia/Manila' },
+      orgA.user.id,
+    );
+
+    await expect(BranchService.get(orgB.user.organizationId, branch.id)).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
+    // But it does resolve for the owning organization.
+    await expect(BranchService.get(orgA.user.organizationId, branch.id)).resolves.toMatchObject({
+      id: branch.id,
+    });
+  });
+
+  it('records an audit log entry when a branch is created', async () => {
+    const orgA = await registerOrg('e');
+    const branch = await BranchService.create(
+      orgA.user.organizationId,
+      { name: 'Audited Branch', timezone: 'Asia/Manila' },
+      orgA.user.id,
+    );
+
+    const logs = await prisma.auditLog.findMany({
+      where: { entityType: 'Branch', entityId: branch.id },
+    });
+    expect(logs).toHaveLength(1);
+    expect(logs[0].action).toBe('branch.create');
+    expect(logs[0].organizationId).toBe(orgA.user.organizationId);
+  });
+
+  it('updating an organization only ever touches that organization', async () => {
+    const orgA = await registerOrg('f');
+    const orgB = await registerOrg('g');
+
+    await OrganizationService.update(
+      orgA.user.organizationId,
+      { name: 'Renamed A' },
+      orgA.user.id,
+    );
+
+    const refreshedA = await OrganizationService.get(orgA.user.organizationId);
+    const refreshedB = await OrganizationService.get(orgB.user.organizationId);
+    expect(refreshedA.name).toBe('Renamed A');
+    expect(refreshedB.name).not.toBe('Renamed A');
+  });
+});

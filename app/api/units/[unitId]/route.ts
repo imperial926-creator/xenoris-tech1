@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { updateUnitSchema } from '@/lib/validation/inventory';
 import { InventoryService } from '@/services/inventory/InventoryService';
 
-export async function PATCH(request: NextRequest, { params }: { params: { unitId: string } }) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ unitId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const body = await request.json();

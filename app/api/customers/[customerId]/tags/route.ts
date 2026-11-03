@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { createCustomerTagSchema } from '@/lib/validation/crm';
 import { CustomerService } from '@/services/crm/CustomerService';
 
-export async function POST(request: NextRequest, { params }: { params: { customerId: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ customerId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
     const body = await request.json();

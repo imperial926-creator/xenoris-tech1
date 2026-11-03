@@ -129,8 +129,10 @@ describe('InventoryService — stock lines, adjustments, waste, transfers', () =
     expect(item.quantityOnHand.toString()).toBe('0');
     const txns = await prisma.inventoryTransaction.findMany({ where: { inventoryItemId: item.id } });
     expect(txns).toHaveLength(1);
-    expect(txns[0].type).toBe('ADJUSTMENT');
-    expect(txns[0].quantityAfter.toString()).toBe('0');
+    const adjustmentTxn = txns[0];
+    if (!adjustmentTxn) throw new Error('Expected an adjustment transaction');
+    expect(adjustmentTxn.type).toBe('ADJUSTMENT');
+    expect(adjustmentTxn.quantityAfter.toString()).toBe('0');
   });
 
   it('rejects a second inventory item for the same (branch, ingredient) pair', async () => {
@@ -181,9 +183,11 @@ describe('InventoryService — stock lines, adjustments, waste, transfers', () =
 
     const txns = await prisma.inventoryTransaction.findMany({ where: { inventoryItemId: item.id, type: 'WASTE' } });
     expect(txns).toHaveLength(1);
-    expect(txns[0].quantityDelta.toString()).toBe('-1.5');
-    expect(txns[0].quantityAfter.toString()).toBe('8.5');
-    expect(txns[0].unitCostAtTime?.toString()).toBe('180');
+    const wasteTxn = txns[0];
+    if (!wasteTxn) throw new Error('Expected a waste transaction');
+    expect(wasteTxn.quantityDelta.toString()).toBe('-1.5');
+    expect(wasteTxn.quantityAfter.toString()).toBe('8.5');
+    expect(wasteTxn.unitCostAtTime?.toString()).toBe('180');
   });
 
   it('transfers stock between branches, decrementing the source and incrementing (auto-creating) the destination', async () => {
@@ -239,8 +243,10 @@ describe('InventoryService — purchase orders', () => {
       user.id,
     );
     expect(po.status).toBe('DRAFT');
-    expect(po.items[0].lineTotal.toString()).toBe('1900.00');
-    expect(po.total.toString()).toBe('1900.00');
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
+    expect(poItem.lineTotal.toFixed(2)).toBe('1900.00');
+    expect(po.total.toFixed(2)).toBe('1900.00');
   });
 
   it('rejects submitting a non-DRAFT purchase order', async () => {
@@ -266,9 +272,11 @@ describe('InventoryService — purchase orders', () => {
       user.id,
     );
     await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
     const received = await InventoryService.receivePurchaseOrderItems(
       user.organizationId, branchA.id, po.id,
-      { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '2000' }] },
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '2000' }] },
       user.id,
     );
     expect(received.status).toBe('RECEIVED');
@@ -295,9 +303,11 @@ describe('InventoryService — purchase orders', () => {
     );
     await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
 
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
     const partial = await InventoryService.receivePurchaseOrderItems(
       user.organizationId, branchA.id, po.id,
-      { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '6' }] },
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '6' }] },
       user.id,
     );
     expect(partial.status).toBe('PARTIALLY_RECEIVED');
@@ -307,7 +317,7 @@ describe('InventoryService — purchase orders', () => {
 
     const complete = await InventoryService.receivePurchaseOrderItems(
       user.organizationId, branchA.id, po.id,
-      { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '4' }] },
+      { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '4' }] },
       user.id,
     );
     expect(complete.status).toBe('RECEIVED');
@@ -324,8 +334,10 @@ describe('InventoryService — purchase orders', () => {
       user.id,
     );
     await InventoryService.submitPurchaseOrder(user.organizationId, branchA.id, po.id, user.id);
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected a purchase order item');
     await expect(
-      InventoryService.receivePurchaseOrderItems(user.organizationId, branchA.id, po.id, { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '11' }] }, user.id),
+      InventoryService.receivePurchaseOrderItems(user.organizationId, branchA.id, po.id, { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '11' }] }, user.id),
     ).rejects.toBeInstanceOf(ConflictError);
   });
 
@@ -356,7 +368,9 @@ describe('InventoryService — stock counts', () => {
     await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '50' }, user.id);
     const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
     expect(count.items).toHaveLength(1);
-    expect(count.items[0].expectedQuantity.toString()).toBe('50');
+    const countItem = count.items[0];
+    if (!countItem) throw new Error('Expected a stock-count item');
+    expect(countItem.expectedQuantity.toString()).toBe('50');
     expect(count.status).toBe('OPEN');
   });
 
@@ -364,7 +378,9 @@ describe('InventoryService — stock counts', () => {
     const { user, branchA, chicken } = await setupFixture('w');
     const item = await InventoryService.createInventoryItem(user.organizationId, branchA.id, { ingredientId: chicken.id, initialQuantity: '50' }, user.id);
     const count = await InventoryService.createStockCount(user.organizationId, branchA.id, {}, user.id);
-    expect(count.items[0].expectedQuantity.toString()).toBe('50');
+    const countItem = count.items[0];
+    if (!countItem) throw new Error('Expected a stock-count item');
+    expect(countItem.expectedQuantity.toString()).toBe('50');
 
     // Something happens to the shelf DURING the counting window — a sale
     // consumes 5kg after the count snapshot was taken but before it's

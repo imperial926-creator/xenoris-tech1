@@ -46,10 +46,14 @@ export class TableService {
     input: CreateTableSectionInput,
     actorUserId: string,
   ) {
-    await this.assertBranchInOrg(organizationId, branchId);
-    const existing = await prisma.tableSection.findUnique({
-      where: { branchId_name: { branchId, name: input.name } },
-    });
+    
+const existing = await prisma.tableSection.findFirst({
+  where: {
+    branchId,
+    name: input.name,
+    active: true,
+  },
+});
     if (existing) throw new ConflictError(`A section named "${input.name}" already exists at this branch.`);
 
     return prisma.$transaction(async (tx) => {

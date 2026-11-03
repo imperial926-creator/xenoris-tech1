@@ -71,11 +71,11 @@ describe('ReportingService.generateIncomeStatement', () => {
       endDate: new Date('2026-08-31T23:59:59.999Z'),
     });
 
-    expect(report.revenue.total.toString()).toBe('1000.00');
-    expect(report.cogs.total.toString()).toBe('400.00');
-    expect(report.grossProfit.toString()).toBe('600.00');
-    expect(report.operatingExpenses.total.toString()).toBe('100.00');
-    expect(report.netProfit.toString()).toBe('500.00');
+    expect(report.revenue.total.toFixed(2)).toBe('1000.00');
+    expect(report.cogs.total.toFixed(2)).toBe('400.00');
+    expect(report.grossProfit.toFixed(2)).toBe('600.00');
+    expect(report.operatingExpenses.total.toFixed(2)).toBe('100.00');
+    expect(report.netProfit.toFixed(2)).toBe('500.00');
   });
 
   it('scopes to a single branch when branchId is given', async () => {
@@ -94,9 +94,9 @@ describe('ReportingService.generateIncomeStatement', () => {
 
     const range = { startDate: new Date('2026-08-01T00:00:00.000Z'), endDate: new Date('2026-08-31T23:59:59.999Z') };
     const reportA = await ReportingService.generateIncomeStatement(user.organizationId, { ...range, branchId: branchA.id });
-    expect(reportA.revenue.total.toString()).toBe('300.00');
+    expect(reportA.revenue.total.toFixed(2)).toBe('300.00');
     const reportAll = await ReportingService.generateIncomeStatement(user.organizationId, range);
-    expect(reportAll.revenue.total.toString()).toBe('1000.00');
+    expect(reportAll.revenue.total.toFixed(2)).toBe('1000.00');
   });
 });
 
@@ -133,7 +133,7 @@ describe('ReportingService.generateBalanceSheet — reconciliation', () => {
     expect(balanceSheet.isBalanced).toBe(true);
     expect(balanceSheet.assets.total.toString()).toBe(balanceSheet.totalLiabilitiesAndEquity.toString());
     // Net income to date = 1000 revenue - 400 COGS - 10000 rent = -9400 (a loss).
-    expect(balanceSheet.equity.netIncomeToDate.toString()).toBe('-9400.00');
+    expect(balanceSheet.equity.netIncomeToDate.toFixed(2)).toBe('-9400.00');
   });
 
   it('excludes DRAFT entries from the balance sheet', async () => {
@@ -148,7 +148,7 @@ describe('ReportingService.generateBalanceSheet — reconciliation', () => {
     }, user.id);
 
     const balanceSheet = await ReportingService.generateBalanceSheet(user.organizationId, { asOfDate: new Date() });
-    expect(balanceSheet.assets.total.toString()).toBe('0.00');
+    expect(balanceSheet.assets.total.toFixed(2)).toBe('0.00');
     expect(balanceSheet.isBalanced).toBe(true);
   });
 
@@ -163,7 +163,7 @@ describe('ReportingService.generateBalanceSheet — reconciliation', () => {
 
     const balanceSheet = await ReportingService.generateBalanceSheet(user.organizationId, { asOfDate: new Date(), branchId: branchA.id });
     expect(balanceSheet.isBalanced).toBe(true);
-    expect(balanceSheet.assets.total.toString()).toBe('250.00');
+    expect(balanceSheet.assets.total.toFixed(2)).toBe('250.00');
   });
 });
 
@@ -215,13 +215,13 @@ describe('ReportingService.generateCashFlow — direct method reconciliation', (
     const fullRange = await ReportingService.generateCashFlow(user.organizationId, {
       startDate: new Date('2026-08-01T00:00:00.000Z'), endDate: new Date('2026-08-31T23:59:59.999Z'),
     });
-    expect(fullRange.operatingActivities.toString()).toBe('900.00'); // +1000 revenue - 100 rent
-    expect(fullRange.investingActivities.toString()).toBe('-2000.00');
-    expect(fullRange.financingActivities.toString()).toBe('5000.00');
-    expect(fullRange.unclassifiedActivities.toString()).toBe('50.00');
-    expect(fullRange.netCashFlow.toString()).toBe('3950.00');
-    expect(fullRange.beginningCash.toString()).toBe('0.00');
-    expect(fullRange.endingCash.toString()).toBe('3950.00');
+    expect(fullRange.operatingActivities.toFixed(2)).toBe('900.00'); // +1000 revenue - 100 rent
+    expect(fullRange.investingActivities.toFixed(2)).toBe('-2000.00');
+    expect(fullRange.financingActivities.toFixed(2)).toBe('5000.00');
+    expect(fullRange.unclassifiedActivities.toFixed(2)).toBe('50.00');
+    expect(fullRange.netCashFlow.toFixed(2)).toBe('3950.00');
+    expect(fullRange.beginningCash.toFixed(2)).toBe('0.00');
+    expect(fullRange.endingCash.toFixed(2)).toBe('3950.00');
     expect(fullRange.isReconciled).toBe(true);
 
     // Narrower range excludes the Aug 1 cash sale from the category totals,
@@ -229,9 +229,9 @@ describe('ReportingService.generateCashFlow — direct method reconciliation', (
     const narrowRange = await ReportingService.generateCashFlow(user.organizationId, {
       startDate: new Date('2026-08-05T00:00:00.000Z'), endDate: new Date('2026-08-31T23:59:59.999Z'),
     });
-    expect(narrowRange.operatingActivities.toString()).toBe('-100.00'); // rent only
-    expect(narrowRange.beginningCash.toString()).toBe('1000.00'); // the Aug 1 sale
-    expect(narrowRange.endingCash.toString()).toBe('3950.00');
+    expect(narrowRange.operatingActivities.toFixed(2)).toBe('-100.00'); // rent only
+    expect(narrowRange.beginningCash.toFixed(2)).toBe('1000.00'); // the Aug 1 sale
+    expect(narrowRange.endingCash.toFixed(2)).toBe('3950.00');
     expect(narrowRange.netCashFlow.toString()).toBe(narrowRange.endingCash.minus(narrowRange.beginningCash).toString());
     expect(narrowRange.isReconciled).toBe(true);
   });
@@ -272,14 +272,14 @@ describe('ReportingService.getFinancialDashboard', () => {
     ], "Today's sale — branch B");
 
     const dashboard = await ReportingService.getFinancialDashboard(user.organizationId, { branchId: branchA.id });
-    expect(dashboard.todayRevenue.toString()).toBe('2500.00'); // 2000 cash + 500 on account
-    expect(dashboard.todayExpenses.toString()).toBe('800.00'); // COGS
-    expect(dashboard.grossProfit.toString()).toBe('1700.00');
-    expect(dashboard.todayOperatingExpenses.toString()).toBe('150.00');
-    expect(dashboard.netProfit.toString()).toBe('1550.00');
-    expect(dashboard.cashPosition.toString()).toBe('2000.00');
-    expect(dashboard.outstandingReceivables.toString()).toBe('500.00');
-    expect(dashboard.outstandingPayables.toString()).toBe('150.00');
-    expect(dashboard.inventoryValue.toString()).toBe('-800.00');
+    expect(dashboard.todayRevenue.toFixed(2)).toBe('2500.00'); // 2000 cash + 500 on account
+    expect(dashboard.todayExpenses.toFixed(2)).toBe('800.00'); // COGS
+    expect(dashboard.grossProfit.toFixed(2)).toBe('1700.00');
+    expect(dashboard.todayOperatingExpenses.toFixed(2)).toBe('150.00');
+    expect(dashboard.netProfit.toFixed(2)).toBe('1550.00');
+    expect(dashboard.cashPosition.toFixed(2)).toBe('2000.00');
+    expect(dashboard.outstandingReceivables.toFixed(2)).toBe('500.00');
+    expect(dashboard.outstandingPayables.toFixed(2)).toBe('150.00');
+    expect(dashboard.inventoryValue.toFixed(2)).toBe('-800.00');
   });
 });

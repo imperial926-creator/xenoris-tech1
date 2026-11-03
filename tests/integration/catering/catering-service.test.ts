@@ -68,7 +68,7 @@ describe('CateringService — packages', () => {
   it('creates a package and lists it back', async () => {
     const { user, branch } = await setupFixture('a');
     const pkg = await CateringService.createPackage(user.organizationId, branch.id, { name: 'Silver', pricePerGuest: '500.00' }, user.id);
-    expect(pkg.pricePerGuest.toString()).toBe('500.00');
+    expect(pkg.pricePerGuest.toFixed(2)).toBe('500.00');
     const list = await CateringService.listPackages(user.organizationId, branch.id);
     expect(list).toHaveLength(1);
   });
@@ -164,9 +164,9 @@ describe('CateringService — quotes', () => {
 
     // food 30x500=15000 + 2000 + 500 + 500 + 500 + 1000 - 0 = 19500
     // + 12% tax (2340.00) = 21840.00 — same worked example as the seed data.
-    expect(quote.foodTotal.toString()).toBe('15000.00');
-    expect(quote.taxTotal.toString()).toBe('2340.00');
-    expect(quote.total.toString()).toBe('21840.00');
+    expect(quote.foodTotal.toFixed(2)).toBe('15000.00');
+    expect(quote.taxTotal.toFixed(2)).toBe('2340.00');
+    expect(quote.total.toFixed(2)).toBe('21840.00');
     expect(quote.status).toBe('DRAFT');
 
     const updatedInquiry = await CateringService.getInquiry(user.organizationId, branch.id, inquiry.id);
@@ -195,8 +195,8 @@ describe('CateringService — quotes', () => {
       { items: [{ description: 'Item', quantity: 2, unitPrice: '100.00' }] },
       user.id,
     );
-    expect(updated.foodTotal.toString()).toBe('200.00');
-    expect(updated.total.toString()).toBe('224.00'); // 200 + 12% tax
+    expect(updated.foodTotal.toFixed(2)).toBe('200.00');
+    expect(updated.total.toFixed(2)).toBe('224.00'); // 200 + 12% tax
   });
 
   it('rejects editing a quote once it is no longer DRAFT', async () => {
@@ -317,7 +317,7 @@ describe('CateringService — events and payments', () => {
   it('records a deposit and balance payment and paymentSummary reflects isFullyPaid', async () => {
     const { user, branch, event } = await acceptedEvent('w');
     // event total = 10 x 50.00 = 500.00 + 12% tax = 560.00
-    expect(event.total.toString()).toBe('560.00');
+    expect(event.total.toFixed(2)).toBe('560.00');
 
     await CateringService.recordPayment(user.organizationId, branch.id, event.id, { type: 'DEPOSIT', method: 'CASH', amount: '200.00', status: 'COMPLETED' }, user.id);
     const afterDeposit = await CateringService.getEvent(user.organizationId, branch.id, event.id);

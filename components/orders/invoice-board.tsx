@@ -167,7 +167,12 @@ export function InvoiceBoard({ branches }: { branches: Branch[] }) {
                       type="button"
                       size="sm"
                       disabled={!voiding[inv.id]?.trim()}
-                      onClick={() => voidInvoice(inv.id, voiding[inv.id])}
+                      onClick={() => {
+  const reason = voiding[inv.id];
+  if (reason?.trim()) {
+    voidInvoice(inv.id, reason);
+  }
+}}
                     >
                       Confirm void
                     </Button>

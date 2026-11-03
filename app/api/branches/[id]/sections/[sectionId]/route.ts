@@ -8,8 +8,9 @@ import { TableService } from '@/services/tables/TableService';
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string; sectionId: string } },
+  props: { params: Promise<{ id: string; sectionId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.TABLE_MANAGE);
     const body = await request.json();

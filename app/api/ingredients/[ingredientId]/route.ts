@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { updateIngredientSchema } from '@/lib/validation/inventory';
 import { InventoryService } from '@/services/inventory/InventoryService';
 
-export async function GET(request: NextRequest, { params }: { params: { ingredientId: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ ingredientId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const ingredient = await InventoryService.getIngredient(session.organizationId, params.ingredientId);
@@ -16,7 +17,8 @@ export async function GET(request: NextRequest, { params }: { params: { ingredie
   }
 }
 
-export async function PATCH(request: NextRequest, { params }: { params: { ingredientId: string } }) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ ingredientId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const body = await request.json();

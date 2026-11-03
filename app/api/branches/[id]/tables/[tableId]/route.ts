@@ -8,8 +8,9 @@ import { TableService } from '@/services/tables/TableService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; tableId: string } },
+  props: { params: Promise<{ id: string; tableId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.TABLE_VIEW);
     const table = await TableService.getTable(session.organizationId, params.id, params.tableId);
@@ -21,8 +22,9 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string; tableId: string } },
+  props: { params: Promise<{ id: string; tableId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.TABLE_MANAGE);
     const body = await request.json();

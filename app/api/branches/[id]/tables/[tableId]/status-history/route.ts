@@ -7,8 +7,9 @@ import { TableService } from '@/services/tables/TableService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; tableId: string } },
+  props: { params: Promise<{ id: string; tableId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.TABLE_VIEW);
     const history = await TableService.getStatusHistory(

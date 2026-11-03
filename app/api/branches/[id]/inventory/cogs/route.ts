@@ -9,7 +9,8 @@ import { InventoryService } from '@/services/inventory/InventoryService';
 const cogsQuerySchema = z.object({ orderId: z.string().trim().min(1) });
 
 /** ?orderId=... -> the real, recipe-driven ingredient cost of that order's SALE_CONSUMPTION transactions (master spec §37's Phase-9 slice — see InventoryService.getCogsForOrder). */
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.INVENTORY_MANAGE);
     const { searchParams } = new URL(request.url);

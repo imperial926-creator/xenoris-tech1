@@ -13,7 +13,8 @@ import { KitchenService } from '@/services/kitchen/KitchenService';
  * see components/kitchen/kitchen-board.tsx for why (no WebSocket/Pusher
  * infra is configured in this build).
  */
-export async function GET(_request: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.KITCHEN_VIEW);
     const orders = await KitchenService.getQueue(session.organizationId, params.id);

@@ -1,4 +1,4 @@
-import 'server-only';
+﻿import 'server-only';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { writeAuditLog } from '@/lib/audit/log';
@@ -22,7 +22,7 @@ const PROFILE_INCLUDE = {
   reviews: { orderBy: { createdAt: 'desc' } },
 } satisfies Prisma.CustomerInclude;
 
-// Order statuses/catering event statuses excluded from spend/frequency —
+// Order statuses/catering event statuses excluded from spend/frequency â€”
 // a cancelled order was never actually fulfilled, so it shouldn't count
 // toward a customer's history any more than it counts toward branch revenue.
 const EXCLUDED_ORDER_STATUS: Prisma.OrderWhereInput['status'] = { not: 'CANCELLED' };
@@ -31,9 +31,17 @@ const EXCLUDED_EVENT_STATUS: Prisma.CateringEventWhereInput['status'] = { not: '
 export class CustomerService {
   // --- profile CRUD --------------------------------------------------------
 
-  static async list(organizationId: string, query: ListCustomersQueryInput) {
+ 
+  static async list(
+    organizationId: string,
+    query: Partial<ListCustomersQueryInput> = {},
+  ) {
     const where: Prisma.CustomerWhereInput = { organizationId };
-    if (query.status) where.status = query.status;
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
     if (query.search) {
       const s = query.search;
       where.OR = [
@@ -43,11 +51,17 @@ export class CustomerService {
         { phone: { contains: s, mode: 'insensitive' } },
       ];
     }
-    // Phase 15 hardening: bounded (previously unbounded, and org-wide
-    // rather than branch-scoped — the widest-blast-radius unbounded list
-    // in this codebase for a multi-branch org with a large customer base;
-    // see docs/architecture.md § 23).
-    return prisma.customer.findMany({ where, orderBy: { createdAt: 'desc' }, take: query.take, skip: query.skip });
+
+    // Keep customer listing bounded, including direct service calls.
+    const take = query.take ?? 50;
+    const skip = query.skip ?? 0;
+
+    return prisma.customer.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take,
+      skip,
+    });
   }
 
   static async get(organizationId: string, customerId: string) {
@@ -62,7 +76,7 @@ export class CustomerService {
   /**
    * Existence + tenancy check used both by this service's own CRUD and by
    * OrderService/ReservationService/CateringService when a caller supplies
-   * a customerId — the one point of truth for "does this Customer belong
+   * a customerId â€” the one point of truth for "does this Customer belong
    * to this organization."
    */
   static async assertCustomerInOrg(organizationId: string, customerId: string) {
@@ -127,22 +141,48 @@ export class CustomerService {
 
   // --- addresses -------------------------------------------------------------
 
+  
   static async addAddress(
     organizationId: string,
     customerId: string,
-    input: CreateCustomerAddressInput,
+    input: Omit<CreateCustomerAddressInput, 'country' | 'isDefault'> & {
+      country?: string;
+      isDefault?: boolean;
+    },
     actorUserId: string,
   ) {
     await this.assertCustomerInOrg(organizationId, customerId);
+
+    const addressInput = {
+      ...input,
+      country: input.country ?? 'PH',
+      isDefault: input.isDefault ?? false,
+    };
+
     return prisma.$transaction(async (tx) => {
-      if (input.isDefault) {
-        await tx.customerAddress.updateMany({ where: { customerId, isDefault: true }, data: { isDefault: false } });
+      if (addressInput.isDefault) {
+        await tx.customerAddress.updateMany({
+          where: { customerId, isDefault: true },
+          data: { isDefault: false },
+        });
       }
-      const address = await tx.customerAddress.create({ data: { customerId, ...input } });
-      await writeAuditLog(tx, {
-        organizationId, userId: actorUserId,
-        action: 'customer_address.create', entityType: 'CustomerAddress', entityId: address.id, newValue: address,
+
+      const address = await tx.customerAddress.create({
+        data: {
+          customerId,
+          ...addressInput,
+        },
       });
+
+      await writeAuditLog(tx, {
+        organizationId,
+        userId: actorUserId,
+        action: 'customer_address.create',
+        entityType: 'CustomerAddress',
+        entityId: address.id,
+        newValue: address,
+      });
+
       return address;
     });
   }
@@ -155,22 +195,42 @@ export class CustomerService {
     actorUserId: string,
   ) {
     await this.assertCustomerInOrg(organizationId, customerId);
-    const existing = await prisma.customerAddress.findFirst({ where: { id: addressId, customerId } });
-    if (!existing) throw new NotFoundError('Customer address');
+
+    const existing = await prisma.customerAddress.findFirst({
+      where: { id: addressId, customerId },
+    });
+
+    if (!existing) {
+      throw new NotFoundError('Customer address');
+    }
 
     return prisma.$transaction(async (tx) => {
-      if (input.isDefault) {
+      if (input.isDefault === true) {
         await tx.customerAddress.updateMany({
-          where: { customerId, isDefault: true, NOT: { id: addressId } },
+          where: {
+            customerId,
+            isDefault: true,
+            id: { not: addressId },
+          },
           data: { isDefault: false },
         });
       }
-      const address = await tx.customerAddress.update({ where: { id: addressId }, data: input });
-      await writeAuditLog(tx, {
-        organizationId, userId: actorUserId,
-        action: 'customer_address.update', entityType: 'CustomerAddress', entityId: address.id,
-        previousValue: existing, newValue: address,
+
+      const address = await tx.customerAddress.update({
+        where: { id: addressId },
+        data: input,
       });
+
+      await writeAuditLog(tx, {
+        organizationId,
+        userId: actorUserId,
+        action: 'customer_address.update',
+        entityType: 'CustomerAddress',
+        entityId: address.id,
+        previousValue: existing,
+        newValue: address,
+      });
+
       return address;
     });
   }
@@ -323,9 +383,9 @@ export class CustomerService {
   // --- analytics / RFM -------------------------------------------------------------
 
   /**
-   * Master spec §31's tracked metrics plus §32's RFM segment, all computed
-   * live from Order/Reservation/CateringEvent — see schema.prisma's
-   * "Phase 8 — CRM" comment block (#4) for why this is never a stored,
+   * Master spec Â§31's tracked metrics plus Â§32's RFM segment, all computed
+   * live from Order/Reservation/CateringEvent â€” see schema.prisma's
+   * "Phase 8 â€” CRM" comment block (#4) for why this is never a stored,
    * potentially-stale column.
    */
   static async getAnalytics(organizationId: string, customerId: string) {
@@ -421,7 +481,7 @@ export class CustomerService {
   /**
    * Segment counts across every customer in the organization, for the CRM
    * dashboard's summary cards. Runs getAnalytics per customer rather than a
-   * single aggregated query — an N+1 pattern that is fine at this build's
+   * single aggregated query â€” an N+1 pattern that is fine at this build's
    * demo/early-stage data volumes but is a known scaling limit, honestly
    * flagged rather than silently accepted: a real production deployment
    * with thousands of customers would need a materialized/batched version

@@ -115,11 +115,15 @@ describe('CustomerService', () => {
 
     const onlyInactive = await CustomerService.list(user.organizationId, { status: 'INACTIVE' });
     expect(onlyInactive).toHaveLength(1);
-    expect(onlyInactive[0].firstName).toBe('Marco');
+    const inactiveCustomer = onlyInactive[0];
+    if (!inactiveCustomer) throw new Error('Expected an inactive customer');
+    expect(inactiveCustomer.firstName).toBe('Marco');
 
     const searched = await CustomerService.list(user.organizationId, { search: 'Villanueva' });
     expect(searched).toHaveLength(1);
-    expect(searched[0].firstName).toBe('Grace');
+    const searchedCustomer = searched[0];
+    if (!searchedCustomer) throw new Error('Expected a searched customer');
+    expect(searchedCustomer.firstName).toBe('Grace');
   });
 
   // --- addresses / preferences / notes / tags ---------------------------------
@@ -202,7 +206,9 @@ describe('CustomerService', () => {
     await CustomerService.addReview(user.organizationId, { customerId: customer.id, rating: 5, comment: 'Loved it' }, user.id);
     const reviews = await CustomerService.listReviews(user.organizationId, customer.id);
     expect(reviews).toHaveLength(1);
-    expect(reviews[0].rating).toBe(5);
+    const firstReview = reviews[0];
+    if (!firstReview) throw new Error('Expected a customer review');
+    expect(firstReview.rating).toBe(5);
   });
 
   // --- customerId wiring on Order/Reservation/CateringInquiry ------------------
@@ -320,11 +326,11 @@ describe('CustomerService', () => {
     await CateringService.updateQuoteStatus(user.organizationId, branch.id, quote.id, { status: 'SENT' }, user.id);
     await CateringService.updateQuoteStatus(user.organizationId, branch.id, quote.id, { status: 'ACCEPTED' }, user.id);
 
-    const event = await prisma.cateringEvent.findFirstOrThrow({ where: { inquiryId: inquiry.id } });
+    const event = await prisma.cateringEvent.findFirstOrThrow({ where: { quoteId: quote.id } });
     expect(event.customerId).toBe(customer.id);
 
     // This single, very large transaction should classify the customer as
-    // HIGH_VALUE — regression coverage (at the integration level) for the
+    // HIGH_VALUE â€” regression coverage (at the integration level) for the
     // same precedence bug fixed in lib/crm/rfm.ts (see tests/unit/crm/rfm.test.ts).
     const analytics = await CustomerService.getAnalytics(user.organizationId, customer.id);
     expect(analytics.totalCateringOrders).toBe(1);
@@ -352,7 +358,7 @@ describe('CustomerService', () => {
       user.id,
     );
     // 3x150.00 + 1x80.00 = 530.00 subtotal, 12% VAT = 63.60, total 593.60
-    expect(order1.total.toString()).toBe('593.60');
+    expect(order1.total.toFixed(2)).toBe('593.60');
 
     const order2 = await OrderService.createOrder(
       user.organizationId,
@@ -369,7 +375,7 @@ describe('CustomerService', () => {
       user.id,
     );
     // 1x150.00 + 2x80.00 = 310.00 subtotal, 12% VAT = 37.20, total 347.20
-    expect(order2.total.toString()).toBe('347.20');
+    expect(order2.total.toFixed(2)).toBe('347.20');
 
     // A cancelled order must not count toward spend/frequency.
     const cancelled = await OrderService.createOrder(
@@ -390,13 +396,18 @@ describe('CustomerService', () => {
     expect(analytics.totalOrders).toBe(2);
     expect(analytics.totalSpending).toBe('940.80');
     expect(analytics.averageOrderValue).toBe('470.40');
-    expect(analytics.favoriteProducts[0].name).toBe('Burger');
-    expect(analytics.favoriteProducts[0].quantity).toBe(4);
-    expect(analytics.favoriteProducts[1].name).toBe('Fries');
-    expect(analytics.favoriteProducts[1].quantity).toBe(3);
+    const favoriteBurger = analytics.favoriteProducts[0];
+    if (!favoriteBurger) throw new Error('Expected Burger in favorite products');
+    expect(favoriteBurger.name).toBe('Burger');
+    expect(favoriteBurger.quantity).toBe(4);
+
+    const favoriteFries = analytics.favoriteProducts[1];
+    if (!favoriteFries) throw new Error('Expected Fries in favorite products');
+    expect(favoriteFries.name).toBe('Fries');
+    expect(favoriteFries.quantity).toBe(3);
     // frequency=2 (<=1 is NEW, not met), monetary well under both HIGH_VALUE
     // and VIP thresholds, recency ~0 days (not AT_RISK/INACTIVE), frequency
-    // 2 < regularMinTransactions(5) — falls through to RETURNING.
+    // 2 < regularMinTransactions(5) â€” falls through to RETURNING.
     expect(analytics.rfm.segment).toBe('RETURNING');
   });
 

@@ -8,8 +8,9 @@ import { CustomerService } from '@/services/crm/CustomerService';
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { customerId: string; addressId: string } },
+  props: { params: Promise<{ customerId: string; addressId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
     const body = await request.json();
@@ -25,8 +26,9 @@ export async function PATCH(
 
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: { customerId: string; addressId: string } },
+  props: { params: Promise<{ customerId: string; addressId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
     // Phase 15 hardening: was {result}, unlike every other DELETE route in

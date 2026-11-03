@@ -666,6 +666,7 @@ model Reservation {
   @@index([organizationId])
   @@index([branchId, startAt])
   @@index([customerUserId])
+  @@index([customerId])
   @@map("reservations")
 }
 
@@ -2509,8 +2510,9 @@ model Expense {
   attachments  ExpenseAttachment[]
 
   @@index([organizationId])
-  @@index([branchId])
+  @@index([branchId, expenseDate])
   @@index([categoryId])
+  @@index([vendorId])
   @@map("expenses")
 }
 

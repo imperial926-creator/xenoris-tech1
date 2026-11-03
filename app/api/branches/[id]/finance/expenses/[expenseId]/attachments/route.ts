@@ -6,7 +6,11 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { addExpenseAttachmentSchema } from '@/lib/validation/accounting';
 import { AccountingService } from '@/services/accounting/AccountingService';
 
-export async function POST(request: NextRequest, { params }: { params: { id: string; expenseId: string } }) {
+export async function POST(
+  request: NextRequest,
+  props: { params: Promise<{ id: string; expenseId: string }> }
+) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.FINANCE_MANAGE);
     const body = await request.json();

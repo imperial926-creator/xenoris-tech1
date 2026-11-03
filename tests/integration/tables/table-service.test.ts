@@ -46,8 +46,10 @@ describe('TableService', () => {
 
     const history = await TableService.getStatusHistory(user.organizationId, branch.id, table.id);
     expect(history).toHaveLength(1);
-    expect(history[0].fromStatus).toBeNull();
-    expect(history[0].toStatus).toBe('AVAILABLE');
+    const firstHistoryEntry = history[0];
+    if (!firstHistoryEntry) throw new Error('Expected one table status history entry');
+    expect(firstHistoryEntry.fromStatus).toBeNull();
+    expect(firstHistoryEntry.toStatus).toBe('AVAILABLE');
   });
 
   it('rejects a duplicate table number within the same branch', async () => {
@@ -72,8 +74,10 @@ describe('TableService', () => {
     expect(updated.status).toBe('OCCUPIED');
 
     const history = await TableService.getStatusHistory(user.organizationId, branch.id, table.id);
-    expect(history[0].fromStatus).toBe('AVAILABLE');
-    expect(history[0].toStatus).toBe('OCCUPIED');
+    const firstHistoryEntry = history[0];
+    if (!firstHistoryEntry) throw new Error('Expected a table status history entry after update');
+    expect(firstHistoryEntry.fromStatus).toBe('AVAILABLE');
+    expect(firstHistoryEntry.toStatus).toBe('OCCUPIED');
   });
 
   it('rejects an illegal status transition (CLEANING -> RESERVED)', async () => {

@@ -7,8 +7,9 @@ import { ReservationService } from '@/services/reservations/ReservationService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; reservationId: string } },
+  props: { params: Promise<{ id: string; reservationId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.RESERVATION_VIEW);
     const history = await ReservationService.getStatusHistory(

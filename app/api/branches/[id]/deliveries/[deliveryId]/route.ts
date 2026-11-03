@@ -7,8 +7,9 @@ import { DeliveryService } from '@/services/delivery/DeliveryService';
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string; deliveryId: string } },
+  props: { params: Promise<{ id: string; deliveryId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const delivery = await DeliveryService.get(session.organizationId, params.id, params.deliveryId);

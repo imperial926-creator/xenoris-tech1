@@ -1,4 +1,4 @@
-import 'server-only';
+﻿import 'server-only';
 import { Prisma } from '@prisma/client';
 import type { CateringEventStatus, CateringQuoteStatus } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
@@ -22,7 +22,7 @@ import type {
   ListCateringEventsQueryInput,
 } from '@/lib/validation/catering';
 
-// Provisional standard PH VAT rate — same value and same "not yet reviewed
+// Provisional standard PH VAT rate â€” same value and same "not yet reviewed
 // by a licensed PH accountant" caveat as OrderService.PROVISIONAL_VAT_RATE.
 // Kept as its own local constant rather than shared, matching this
 // codebase's established "small validation/pricing constants stay local to
@@ -30,7 +30,7 @@ import type {
 // comment for the same reasoning applied to a different constant).
 const PROVISIONAL_VAT_RATE = new Prisma.Decimal('0.12');
 
-/** Quote status whitelist — mirrors OrderService/DeliveryService's pattern. */
+/** Quote status whitelist â€” mirrors OrderService/DeliveryService's pattern. */
 const QUOTE_ALLOWED_TRANSITIONS: Record<CateringQuoteStatus, CateringQuoteStatus[]> = {
   DRAFT: ['SENT', 'CANCELLED'],
   SENT: ['VIEWED', 'ACCEPTED', 'REJECTED', 'EXPIRED', 'CANCELLED'],
@@ -79,14 +79,18 @@ export class CateringService {
   static async createPackage(
     organizationId: string,
     branchId: string,
-    input: CreateCateringPackageInput,
+       input: CreateCateringPackageInput,
     actorUserId: string,
   ) {
     await this.assertBranchInOrg(organizationId, branchId);
-    const existing = await prisma.cateringPackage.findUnique({
-      where: { branchId_name: { branchId, name: input.name } },
+
+    const existing = await prisma.cateringPackage.findFirst({
+      where: { branchId, name: input.name, active: true },
+      select: { id: true },
     });
-    if (existing) throw new ConflictError(`A catering package named "${input.name}" already exists at this branch.`);
+    if (existing) {
+      throw new ConflictError(`A catering package named "${input.name}" already exists at this branch.`);
+    }
 
     return prisma.$transaction(async (tx) => {
       const pkg = await tx.cateringPackage.create({
@@ -131,8 +135,8 @@ export class CateringService {
 
   static async listInquiries(organizationId: string, branchId: string, query: ListCateringInquiriesQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
-    // Phase 15 hardening: bounded (previously unbounded — see
-    // docs/architecture.md § 23).
+    // Phase 15 hardening: bounded (previously unbounded â€” see
+    // docs/architecture.md Â§ 23).
     return prisma.cateringInquiry.findMany({
       where: { organizationId, branchId, status: query.status },
       orderBy: { createdAt: 'desc' },
@@ -150,12 +154,15 @@ export class CateringService {
     return inquiry;
   }
 
-  static async createInquiry(
+    static async createInquiry(
     organizationId: string,
     branchId: string,
-    input: CreateCateringInquiryInput,
+    input: Omit<CreateCateringInquiryInput, 'deliveryRequested'> & {
+      deliveryRequested?: boolean;
+    },
     actorUserId: string,
   ) {
+    const deliveryRequested = input.deliveryRequested ?? false;
     await this.assertBranchInOrg(organizationId, branchId);
     if (input.customerUserId) {
       const customer = await prisma.user.findFirst({ where: { id: input.customerUserId, organizationId } });
@@ -191,7 +198,7 @@ export class CateringService {
           equipmentRequests: input.equipmentRequests,
           staffRequests: input.staffRequests,
           setupRequests: input.setupRequests,
-          deliveryRequested: input.deliveryRequested,
+          deliveryRequested,
           deliveryAddress: input.deliveryAddress,
           specialRequests: input.specialRequests,
         },
@@ -204,7 +211,7 @@ export class CateringService {
     });
   }
 
-  /** Edits inquiry details. Blocked once a quote exists (QUOTED/CONVERTED) — amend the quote instead. */
+  /** Edits inquiry details. Blocked once a quote exists (QUOTED/CONVERTED) â€” amend the quote instead. */
   static async updateInquiry(
     organizationId: string,
     branchId: string,
@@ -214,7 +221,7 @@ export class CateringService {
   ) {
     const existing = await this.getInquiry(organizationId, branchId, inquiryId);
     if (existing.status !== 'NEW' && input.status === undefined) {
-      throw new ConflictError(`Cannot edit inquiry details once it is ${existing.status} — amend the quote instead.`);
+      throw new ConflictError(`Cannot edit inquiry details once it is ${existing.status} â€” amend the quote instead.`);
     }
     let eventDate: Date | undefined;
     if (input.eventDate) {
@@ -249,8 +256,8 @@ export class CateringService {
 
   static async listQuotes(organizationId: string, branchId: string, query: ListCateringQuotesQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
-    // Phase 15 hardening: bounded (previously unbounded — see
-    // docs/architecture.md § 23).
+    // Phase 15 hardening: bounded (previously unbounded â€” see
+    // docs/architecture.md Â§ 23).
     return prisma.cateringQuote.findMany({
       where: { organizationId, branchId, status: query.status, inquiryId: query.inquiryId },
       include: QUOTE_INCLUDE,
@@ -271,7 +278,7 @@ export class CateringService {
 
   /**
    * Creates a DRAFT quote for an inquiry, server-computing food/tax/total
-   * from the submitted items and flat fee amounts — the master spec's
+   * from the submitted items and flat fee amounts â€” the master spec's
    * quotation formula (Food + Staffing + Equipment + Transportation +
    * Setup + Service Fees - Discounts + Taxes = TOTAL), never trusting a
    * client-submitted total, same rule Phase 4 established for `Order`.
@@ -344,7 +351,7 @@ export class CateringService {
   ) {
     const existing = await this.getQuote(organizationId, branchId, quoteId);
     if (existing.status !== 'DRAFT') {
-      throw new ConflictError(`Cannot edit a quote once it is ${existing.status} — only DRAFT quotes may be amended.`);
+      throw new ConflictError(`Cannot edit a quote once it is ${existing.status} â€” only DRAFT quotes may be amended.`);
     }
     if (input.packageId) {
       await this.getPackage(organizationId, branchId, input.packageId);
@@ -402,10 +409,10 @@ export class CateringService {
 
   /**
    * Whitelisted status transitions. ACCEPTED is special-cased: in the same
-   * transaction it creates the 1:1 CateringEvent (master spec §22 — "When
+   * transaction it creates the 1:1 CateringEvent (master spec Â§22 â€” "When
    * accepted, create the appropriate catering event"), snapshots the
    * quote's items as CateringEventItems, and bumps the parent inquiry to
-   * CONVERTED — mirroring how Phase 6's DeliveryOrder is created inside
+   * CONVERTED â€” mirroring how Phase 6's DeliveryOrder is created inside
    * OrderService.createOrder's own transaction rather than a separate step.
    */
   static async updateQuoteStatus(
@@ -452,8 +459,8 @@ export class CateringService {
             branchId,
             quoteId: quote.id,
             customerUserId: quote.inquiry.customerUserId,
-            // Phase 8 — CRM. Copied from the inquiry, not client-settable —
-            // see the "Phase 8 — CRM" comment block in schema.prisma (#2).
+            // Phase 8 â€” CRM. Copied from the inquiry, not client-settable â€”
+            // see the "Phase 8 â€” CRM" comment block in schema.prisma (#2).
             customerId: quote.inquiry.customerId,
             guestName: quote.inquiry.guestName,
             guestEmail: quote.inquiry.guestEmail,
@@ -488,8 +495,8 @@ export class CateringService {
       return tx.cateringQuote.findUniqueOrThrow({ where: { id: updated.id }, include: QUOTE_INCLUDE });
     });
 
-    // Phase 14 — Notifications. Fired after the transaction above has
-    // already committed — see NotificationService's class header point 1.
+    // Phase 14 â€” Notifications. Fired after the transaction above has
+    // already committed â€” see NotificationService's class header point 1.
     // "Catering quotation" fires when a quote transitions to SENT;
     // recipient sourced from result.inquiry, since QUOTE_INCLUDE already
     // includes it.
@@ -504,8 +511,8 @@ export class CateringService {
 
   static async listEvents(organizationId: string, branchId: string, query: ListCateringEventsQueryInput) {
     await this.assertBranchInOrg(organizationId, branchId);
-    // Phase 15 hardening: bounded (previously unbounded — see
-    // docs/architecture.md § 23).
+    // Phase 15 hardening: bounded (previously unbounded â€” see
+    // docs/architecture.md Â§ 23).
     return prisma.cateringEvent.findMany({
       where: { organizationId, branchId, status: query.status },
       include: EVENT_INCLUDE,
@@ -524,7 +531,7 @@ export class CateringService {
     return event;
   }
 
-  /** Sum of COMPLETED payments minus REFUNDED, and whether that covers the event total — same shape as OrderService.paymentSummary. */
+  /** Sum of COMPLETED payments minus REFUNDED, and whether that covers the event total â€” same shape as OrderService.paymentSummary. */
   static paymentSummary(event: { total: Prisma.Decimal | string; payments: Array<{ amount: Prisma.Decimal | string; status: string }> }) {
     let paid = new Prisma.Decimal(0);
     for (const p of event.payments) {
@@ -573,8 +580,8 @@ export class CateringService {
       return tx.cateringEvent.findUniqueOrThrow({ where: { id: updated.id }, include: EVENT_INCLUDE });
     });
 
-    // Phase 14 — Notifications. Fired after the transaction above has
-    // already committed — see NotificationService's class header point 1.
+    // Phase 14 â€” Notifications. Fired after the transaction above has
+    // already committed â€” see NotificationService's class header point 1.
     // "Review request" fires when the event reaches COMPLETED, one of the
     // three "service just finished" trigger sites (alongside
     // OrderService.updateStatus and ReservationService.updateStatus).
@@ -592,7 +599,7 @@ export class CateringService {
 
   /**
    * Manually records a deposit or balance payment against an event. No
-   * payment gateway exists yet — staff attesting money changed hands, same
+   * payment gateway exists yet â€” staff attesting money changed hands, same
    * pattern as OrderService.recordPayment/ReservationService.recordDeposit.
    */
   static async recordPayment(
@@ -619,13 +626,13 @@ export class CateringService {
         },
       });
 
-      // Phase 10 — Accounting. §23: deposits are a liability, never
+      // Phase 10 â€” Accounting. Â§23: deposits are a liability, never
       // automatic revenue. A DEPOSIT payment posts Debit Cash / Credit
       // Customer Deposits (or the reverse if recorded as a refund); a
       // BALANCE payment is this build's revenue-recognition trigger for
       // catering, recognizing the sum of actual payments received to date
       // (this payment plus every prior COMPLETED deposit) rather than the
-      // quoted total — see schema.prisma's Phase 10 decision #4. A BALANCE
+      // quoted total â€” see schema.prisma's Phase 10 decision #4. A BALANCE
       // payment recorded as REFUNDED is deliberately left unwired (see
       // AccountingService.recordCateringDepositRefunded's doc comment).
       if (input.type === 'DEPOSIT' && input.status === 'COMPLETED') {
@@ -675,7 +682,7 @@ export class CateringService {
     const serviceFeeTotal = new Prisma.Decimal(input.serviceFeeTotal);
     const discountTotal = new Prisma.Decimal(input.discountTotal);
 
-    // Master spec §22 formula: Food + Staffing + Equipment + Transportation
+    // Master spec Â§22 formula: Food + Staffing + Equipment + Transportation
     // + Setup + Service Fees - Discounts + Taxes = TOTAL.
     const preTaxSubtotal = foodTotal
       .plus(staffingTotal)
@@ -696,3 +703,4 @@ export class CateringService {
     return branch;
   }
 }
+

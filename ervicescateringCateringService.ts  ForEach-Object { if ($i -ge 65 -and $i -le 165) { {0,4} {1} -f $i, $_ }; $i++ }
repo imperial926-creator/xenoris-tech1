@@ -1,0 +1,205 @@
+warning: in the working copy of 'services/catering/CateringService.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/inventory/InventoryService.ts', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/services/catering/CateringService.ts b/services/catering/CateringService.ts[m
+[1mindex 8d919fc..4b08a23 100644[m
+[1m--- a/services/catering/CateringService.ts[m
+[1m+++ b/services/catering/CateringService.ts[m
+[36m@@ -76,17 +76,41 @@[m [mexport class CateringService {[m
+     return pkg;[m
+   }[m
+ [m
+[31m-  static async createPackage([m
+[32m+[m[41m [m
+[32m+[m[41m   [m
+[32m+[m[41m [m
+[32m+[m[32m  static async updateUnit([m
+     organizationId: string,[m
+[31m-    branchId: string,[m
+[31m-    input: CreateCateringPackageInput,[m
+[32m+[m[32m    unitId: string,[m
+[32m+[m[32m    input: UpdateUnitInput,[m
+     actorUserId: string,[m
+   ) {[m
+[31m-    await this.assertBranchInOrg(organizationId, branchId);[m
+[31m-    const existing = await prisma.cateringPackage.findUnique({[m
+[31m-      where: { branchId_name: { branchId, name: input.name } },[m
+[32m+[m[32m    const existing = await prisma.unit.findFirst({[m
+[32m+[m[32m      where: { id: unitId, organizationId },[m
+     });[m
+[31m-    if (existing) throw new ConflictError(`A catering package named "${input.name}" already exists at this branch.`);[m
+[32m+[m[32m    if (!existing) throw new NotFoundError('Unit');[m
+[32m+[m
+[32m+[m[32m    return prisma.$transaction(async (tx) => {[m
+[32m+[m[32m      const unit = await tx.unit.update({[m
+[32m+[m[32m        where: { id: unitId },[m
+[32m+[m[32m        data: input,[m
+[32m+[m[32m      });[m
+[32m+[m
+[32m+[m[32m      await writeAuditLog(tx, {[m
+[32m+[m[32m        organizationId,[m
+[32m+[m[32m        userId: actorUserId,[m
+[32m+[m[32m        action: 'unit.update',[m
+[32m+[m[32m        entityType: 'Unit',[m
+[32m+[m[32m        entityId: unit.id,[m
+[32m+[m[32m        previousValue: existing,[m
+[32m+[m[32m        newValue: unit,[m
+[32m+[m[32m      });[m
+[32m+[m
+[32m+[m[32m      return unit;[m
+[32m+[m[32m    });[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m
+ [m
+     return prisma.$transaction(async (tx) => {[m
+       const pkg = await tx.cateringPackage.create({[m
+[36m@@ -100,10 +124,22 @@[m [mexport class CateringService {[m
+           maxGuests: input.maxGuests,[m
+         },[m
+       });[m
+[32m+[m
+       await writeAuditLog(tx, {[m
+[31m-        organizationId, branchId, userId: actorUserId,[m
+[31m-        action: 'catering_package.create', entityType: 'CateringPackage', entityId: pkg.id, newValue: pkg,[m
+[32m+[m[32m        organizationId,[m
+[32m+[m[32m        branchId,[m
+[32m+[m[32m        userId: actorUserId,[m
+[32m+[m[32m        action: 'catering_package.create',[m
+[32m+[m[32m        entityType: 'CateringPackage',[m
+[32m+[m[32m        entityId: pkg.id,[m
+[32m+[m[32m        newValue: pkg,[m
+       });[m
+[32m+[m
+[32m+[m[32m      return pkg;[m
+[32m+[m[32m    });[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m
+       return pkg;[m
+     });[m
+   }[m
+[1mdiff --git a/services/inventory/InventoryService.ts b/services/inventory/InventoryService.ts[m
+[1mindex 37c030e..aea2c48 100644[m
+[1m--- a/services/inventory/InventoryService.ts[m
+[1m+++ b/services/inventory/InventoryService.ts[m
+[36m@@ -77,19 +77,57 @@[m [mexport class InventoryService {[m
+     const existing = await prisma.unit.findFirst({ where: { id: unitId, organizationId } });[m
+     if (!existing) throw new NotFoundError('Unit');[m
+ [m
+[32m+[m[41m    [m
+[32m+[m[32m  static async createPackage([m
+[32m+[m[32m    organizationId: string,[m
+[32m+[m[32m    branchId: string,[m
+[32m+[m[32m    input: CreateCateringPackageInput,[m
+[32m+[m[32m    actorUserId: string,[m
+[32m+[m[32m  ) {[m
+[32m+[m[32m    await this.assertBranchInOrg(organizationId, branchId);[m
+[32m+[m
+[32m+[m[32m    const existing = await prisma.cateringPackage.findFirst({[m
+[32m+[m[32m      where: {[m
+[32m+[m[32m        branchId,[m
+[32m+[m[32m        name: input.name,[m
+[32m+[m[32m        active: true,[m
+[32m+[m[32m      },[m
+[32m+[m[32m    });[m
+[32m+[m
+[32m+[m[32m    if (existing) {[m
+[32m+[m[32m      throw new ConflictError([m
+[32m+[m[32m        `A catering package named "${input.name}" already exists at this branch.`,[m
+[32m+[m[32m      );[m
+[32m+[m[32m    }[m
+[32m+[m
+     return prisma.$transaction(async (tx) => {[m
+[31m-      const unit = await tx.unit.update({ where: { id: unitId }, data: input });[m
+[32m+[m[32m      const pkg = await tx.cateringPackage.create({[m
+[32m+[m[32m        data: {[m
+[32m+[m[32m          organizationId,[m
+[32m+[m[32m          branchId,[m
+[32m+[m[32m          name: input.name,[m
+[32m+[m[32m          description: input.description,[m
+[32m+[m[32m          pricePerGuest: input.pricePerGuest,[m
+[32m+[m[32m          minGuests: input.minGuests,[m
+[32m+[m[32m          maxGuests: input.maxGuests,[m
+[32m+[m[32m        },[m
+[32m+[m[32m      });[m
+[32m+[m
+       await writeAuditLog(tx, {[m
+[31m-        organizationId, userId: actorUserId,[m
+[31m-        action: 'unit.update', entityType: 'Unit', entityId: unit.id, previousValue: existing, newValue: unit,[m
+[32m+[m[32m        organizationId,[m
+[32m+[m[32m        branchId,[m
+[32m+[m[32m        userId: actorUserId,[m
+[32m+[m[32m        action: 'catering_package.create',[m
+[32m+[m[32m        entityType: 'CateringPackage',[m
+[32m+[m[32m        entityId: pkg.id,[m
+[32m+[m[32m        newValue: pkg,[m
+       });[m
+[31m-      return unit;[m
+[32m+[m
+[32m+[m[32m      return pkg;[m
+     });[m
+   }[m
+ [m
+[31m-  // ===========================================================================[m
+[31m-  // Ingredients[m
+[31m-  // ===========================================================================[m
+[32m+[m
+ [m
+   static async listIngredients(organizationId: string, search?: string) {[m
+     return prisma.ingredient.findMany({[m
+[36m@@ -511,24 +549,46 @@[m [mexport class InventoryService {[m
+   // Suppliers[m
+   // ===========================================================================[m
+ [m
+[31m-  static async listSuppliers(organizationId: string) {[m
+[31m-    return prisma.supplier.findMany({ where: { organizationId }, orderBy: { name: 'asc' } });[m
+[31m-  }[m
+[32m+[m[41m  [m
+[32m+[m[32m  static async createSupplier([m
+[32m+[m[32m    organizationId: string,[m
+[32m+[m[32m    input: CreateSupplierInput,[m
+[32m+[m[32m    actorUserId: string,[m
+[32m+[m[32m  ) {[m
+[32m+[m[32m    const existing = await prisma.supplier.findFirst({[m
+[32m+[m[32m      where: {[m
+[32m+[m[32m        organizationId,[m
+[32m+[m[32m        name: input.name,[m
+[32m+[m[32m        active: true,[m
+[32m+[m[32m      },[m
+[32m+[m[32m    });[m
+ [m
+[31m-  static async createSupplier(organizationId: string, input: CreateSupplierInput, actorUserId: string) {[m
+[31m-    const existing = await prisma.supplier.findUnique({ where: { organizationId_name: { organizationId, name: input.name } } });[m
+[31m-    if (existing) throw new ConflictError(`A supplier named "${input.name}" already exists.`);[m
+[32m+[m[32m    if (existing) {[m
+[32m+[m[32m      throw new ConflictError([m
+[32m+[m[32m        `A supplier named "${input.name}" already exists.`,[m
+[32m+[m[32m      );[m
+[32m+[m[32m    }[m
+ [m
+     return prisma.$transaction(async (tx) => {[m
+[31m-      const supplier = await tx.supplier.create({ data: { organizationId, ...input } });[m
+[32m+[m[32m      const supplier = await tx.supplier.create({[m
+[32m+[m[32m        data: { organizationId, ...input },[m
+[32m+[m[32m      });[m
+[32m+[m
+       await writeAuditLog(tx, {[m
+[31m-        organizationId, userId: actorUserId,[m
+[31m-        action: 'supplier.create', entityType: 'Supplier', entityId: supplier.id, newValue: supplier,[m
+[32m+[m[32m        organizationId,[m
+[32m+[m[32m        userId: actorUserId,[m
+[32m+[m[32m        action: 'supplier.create',[m
+[32m+[m[32m        entityType: 'Supplier',[m
+[32m+[m[32m        entityId: supplier.id,[m
+[32m+[m[32m        newValue: supplier,[m
+       });[m
+[32m+[m
+       return supplier;[m
+     });[m
+   }[m
+ [m
+[32m+[m
+[32m+[m
+   static async updateSupplier(organizationId: string, supplierId: string, input: UpdateSupplierInput, actorUserId: string) {[m
+     const existing = await this.assertSupplierInOrg(organizationId, supplierId);[m
+ [m

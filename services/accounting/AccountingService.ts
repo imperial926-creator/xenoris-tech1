@@ -135,7 +135,10 @@ export class AccountingService {
     });
   }
 
-  static async listAccounts(organizationId: string, query: ListAccountsQueryInput) {
+  static async listAccounts(
+  organizationId: string,
+  query: { type?: ListAccountsQueryInput['type']; includeInactive?: boolean },
+) {
     return prisma.chartOfAccount.findMany({
       where: {
         organizationId,
@@ -558,7 +561,15 @@ export class AccountingService {
   }
 
   static async createVendor(organizationId: string, input: CreateVendorInput, actorUserId: string) {
-    const existing = await prisma.vendor.findUnique({ where: { organizationId_name: { organizationId, name: input.name } } });
+    
+const existing = await prisma.vendor.findFirst({
+  where: {
+    organizationId,
+    name: input.name,
+    active: true,
+  },
+});
+
     if (existing) throw new ConflictError(`A vendor named "${input.name}" already exists.`);
     return prisma.$transaction(async (tx) => {
       const vendor = await tx.vendor.create({ data: { organizationId, ...input } });
@@ -588,7 +599,13 @@ export class AccountingService {
 
   static async createExpenseCategory(organizationId: string, input: CreateExpenseCategoryInput, actorUserId: string) {
     if (input.defaultAccountId) await this.assertAccountInOrg(organizationId, input.defaultAccountId);
-    const existing = await prisma.expenseCategory.findUnique({ where: { organizationId_name: { organizationId, name: input.name } } });
+    const existing = await prisma.expenseCategory.findFirst({
+  where: {
+    organizationId,
+    name: input.name,
+    active: true,
+  },
+});
     if (existing) throw new ConflictError(`An expense category named "${input.name}" already exists.`);
     return prisma.$transaction(async (tx) => {
       const category = await tx.expenseCategory.create({ data: { organizationId, name: input.name, defaultAccountId: input.defaultAccountId } });
@@ -596,9 +613,15 @@ export class AccountingService {
       return category;
     });
   }
-
   static async updateExpenseCategory(organizationId: string, categoryId: string, input: UpdateExpenseCategoryInput, actorUserId: string) {
-    const existing = await this.assertCategoryInOrg(organizationId, categoryId);
+    
+const existing = await prisma.expenseCategory.findFirst({
+  where: {
+    organizationId,
+    name: input.name,
+    active: true,
+  },
+});
     if (input.defaultAccountId) await this.assertAccountInOrg(organizationId, input.defaultAccountId);
     return prisma.$transaction(async (tx) => {
       const category = await tx.expenseCategory.update({ where: { id: categoryId }, data: { name: input.name, defaultAccountId: input.defaultAccountId, active: input.active } });
@@ -674,6 +697,7 @@ export class AccountingService {
     if (!expense.category.defaultAccountId) {
       throw new ConflictError(`Expense category "${expense.category.name}" has no default account configured — set one before approving expenses in this category.`);
     }
+const defaultAccountId = expense.category.defaultAccountId;
 
     return prisma.$transaction(async (tx) => {
       // Phase 15 hardening: claim the expense (guarded on approvalStatus)
@@ -699,7 +723,7 @@ export class AccountingService {
         referenceType: 'Expense', referenceId: expense.id,
         financialTransactionType: 'EXPENSE_POSTED',
         lines: [
-          { accountId: expense.category.defaultAccountId, debit: expense.amount },
+          { accountId: defaultAccountId, debit: expense.amount },
           { accountId: cashAccount.id, credit: expense.amount },
         ],
         actorUserId,

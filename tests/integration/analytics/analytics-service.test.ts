@@ -35,7 +35,7 @@ async function setupFixture(suffix: string) {
   return { user, branch, category, item };
 }
 
-/** This build's "this_month" preset over `now()` — the query every test below uses, since every fixture's timestamps default to `now()`. */
+/** This build's "this_month" preset over `now()` â€” the query every test below uses, since every fixture's timestamps default to `now()`. */
 const THIS_MONTH = { preset: 'this_month' as const };
 
 function hoursFromNow(h: number) {
@@ -72,6 +72,7 @@ describe('AnalyticsService.getRevenueDashboard', () => {
       items: [{ description: 'Buffet', quantity: 20, unitPrice: '300.00' }],
       staffingTotal: '0', equipmentTotal: '0', transportationTotal: '0', setupTotal: '0', serviceFeeTotal: '0', discountTotal: '0',
     }, user.id);
+    await CateringService.updateQuoteStatus(user.organizationId, branch.id, quote.id, { status: 'SENT' }, user.id);
     const accepted = await CateringService.updateQuoteStatus(user.organizationId, branch.id, quote.id, { status: 'ACCEPTED' }, user.id);
     const eventId = accepted.event!.id;
     await CateringService.recordPayment(user.organizationId, branch.id, eventId, { type: 'BALANCE', method: 'CASH', amount: quote.total.toString(), status: 'COMPLETED' }, user.id);
@@ -115,7 +116,7 @@ describe('AnalyticsService.getProfitDashboard', () => {
     return AccountingService.postJournalEntry(organizationId, created.id, actorUserId);
   }
 
-  it("the trend buckets' netProfit sums exactly to the whole-range totals.netProfit — master spec's reconciliation requirement, extended to bucketing", async () => {
+  it("the trend buckets' netProfit sums exactly to the whole-range totals.netProfit â€” master spec's reconciliation requirement, extended to bucketing", async () => {
     const { user } = await setupFixture('profit-a');
     const list = await AccountingService.listAccounts(user.organizationId, {});
     const byName = new Map<string, (typeof list)[number]>();
@@ -130,7 +131,7 @@ describe('AnalyticsService.getProfitDashboard', () => {
     const y = now.getUTCFullYear();
     const m = String(now.getUTCMonth() + 1).padStart(2, '0');
     // Three entries spread across the current month (day 2, day 15, and
-    // whichever day `now` actually falls on) — a day-granularity trend
+    // whichever day `now` actually falls on) â€” a day-granularity trend
     // (this_month is well under 31 days) puts them in different buckets
     // whenever `now`'s day differs from 2 and 15, exercising the
     // multi-bucket summation path rather than a single trivial bucket.
@@ -142,9 +143,9 @@ describe('AnalyticsService.getProfitDashboard', () => {
 
     const bucketSum = dashboard.trend.reduce((sum, t) => sum + Number(t.netProfit), 0);
     expect(bucketSum.toFixed(2)).toBe(dashboard.totals.netProfit.toFixed(2));
-    expect(dashboard.totals.revenue.total.toString()).toBe('1000.00');
-    expect(dashboard.totals.cogs.total.toString()).toBe('300.00');
-    expect(dashboard.totals.netProfit.toString()).toBe('550.00');
+    expect(dashboard.totals.revenue.total.toFixed(2)).toBe('1000.00');
+    expect(dashboard.totals.cogs.total.toFixed(2)).toBe('300.00');
+    expect(dashboard.totals.netProfit.toFixed(2)).toBe('550.00');
   });
 
   it('rejects a branchId that does not belong to the organization', async () => {
@@ -163,7 +164,7 @@ describe('AnalyticsService.getCustomerAnalytics', () => {
     const newCustomer = await CustomerService.create(user.organizationId, { firstName: 'New', lastName: 'Customer' }, user.id);
 
     // Backdate a prior order for repeatCustomer to simulate "ordered before
-    // this period" — OrderService.createOrder has no createdAt input (every
+    // this period" â€” OrderService.createOrder has no createdAt input (every
     // order is stamped `now()`, by design, so nothing can silently
     // backdate itself through normal API use); this is a direct,
     // test-only timestamp adjustment on an already-validly-created row,
@@ -199,13 +200,17 @@ describe('AnalyticsService.getProductAnalytics', () => {
 
     const analytics = await AnalyticsService.getProductAnalytics(user.organizationId, THIS_MONTH);
 
-    expect(analytics.topProductsByQuantity[0].menuItemId).toBe(item.id);
-    expect(analytics.topProductsByQuantity[0].quantitySold).toBe(3);
-    expect(analytics.topProductsByRevenue[0].menuItemId).toBe(item.id); // 450 > 50
+    const topQuantityProduct = analytics.topProductsByQuantity[0];
+    if (!topQuantityProduct) throw new Error('Expected a top product by quantity');
+    expect(topQuantityProduct.menuItemId).toBe(item.id);
+    expect(topQuantityProduct.quantitySold).toBe(3);
+    const topRevenueProduct = analytics.topProductsByRevenue[0];
+    if (!topRevenueProduct) throw new Error('Expected a top product by revenue');
+    expect(topRevenueProduct.menuItemId).toBe(item.id); // 450 > 50
     const burgerCategory = analytics.revenueByCategory.find((c) => c.categoryId === category.id);
     const drinkCategory = analytics.revenueByCategory.find((c) => c.categoryId === category2.id);
     // revenue here traces back to a Prisma groupBy `_sum` aggregate (a real
-    // SQL SUM()), not a direct column read or a `.plus()` chain over one —
+    // SQL SUM()), not a direct column read or a `.plus()` chain over one â€”
     // compared numerically rather than by exact string, the same caution
     // CustomerService.getAnalytics already applies to its own `_sum` reads
     // (it calls `.toFixed(2)` rather than trusting `.toString()` there too).
@@ -255,17 +260,17 @@ describe('AnalyticsService.getInventoryAnalytics', () => {
 
     // wasteCost.total is a computed (quantity x costPerUnit) figure, not a
     // direct DB column read, so its exact decimal.js string formatting
-    // isn't asserted here (unlike the DB-passthrough fields below) —
+    // isn't asserted here (unlike the DB-passthrough fields below) â€”
     // compared numerically instead. 2.5 x 20.00 = 50.
     expect(Number(analytics.wasteCost.total)).toBeCloseTo(50, 6);
     const wastedIngredient = analytics.wasteCost.byIngredient.find((i) => i.ingredientId === ingredient.id);
-    // `quantity` here is a direct WasteRecord.quantity DB read (NUMERIC(14,4)) —
+    // `quantity` here is a direct WasteRecord.quantity DB read (NUMERIC(14,4)) â€”
     // Postgres returns it padded to the column's declared scale, same
     // convention tests/integration/reporting/reporting-service.test.ts
     // relies on for its own exact `.toString()` assertions.
-    expect(wastedIngredient?.quantity.toString()).toBe('2.5000');
+    expect(wastedIngredient?.quantity.toFixed(4)).toBe('2.5000');
     // quantityOnHand (5) is at/below reorderPoint (10) from the moment the
-    // item is created (initialQuantity below threshold) — LOW even before
+    // item is created (initialQuantity below threshold) â€” LOW even before
     // the waste record further reduces it.
     expect(analytics.lowStockCount + analytics.criticalStockCount).toBeGreaterThanOrEqual(1);
     const flagged = analytics.lowStockItems.find((i) => i.id === invItem.id);
@@ -282,10 +287,12 @@ describe('AnalyticsService.getInventoryAnalytics', () => {
       supplierId: supplier.id, items: [{ ingredientId: ingredient.id, unitId: unit.id, quantityOrdered: '100', unitCost: '15.00' }],
     }, user.id);
     await InventoryService.submitPurchaseOrder(user.organizationId, branch.id, po.id, user.id);
-    const received = await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: po.items[0].id, quantityReceived: '100' }] }, user.id);
+    const poItem = po.items[0];
+    if (!poItem) throw new Error('Expected purchase order to contain an item');
+    const received = await InventoryService.receivePurchaseOrderItems(user.organizationId, branch.id, po.id, { items: [{ purchaseOrderItemId: poItem.id, quantityReceived: '100' }] }, user.id);
 
     const analytics = await AnalyticsService.getInventoryAnalytics(user.organizationId, THIS_MONTH);
-    // purchaseSpend.total is a Prisma `_sum` aggregate (real SQL SUM()) —
+    // purchaseSpend.total is a Prisma `_sum` aggregate (real SQL SUM()) â€”
     // compared numerically rather than by exact string, same caution as
     // getProductAnalytics's revenue-by-category assertions above.
     expect(Number(analytics.purchaseSpend.total)).toBeCloseTo(Number(received.total), 6);
@@ -300,7 +307,7 @@ describe('AnalyticsService.getOperationalAnalytics', () => {
   it('counts reservations by status and reports table utilization within the active-table denominator', async () => {
     const { user, branch } = await setupFixture('ops-a');
     const table = await TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T1', capacity: 4 }, user.id);
-    await TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T2', capacity: 4 }, user.id); // unused table — denominator, not numerator
+    await TableService.createTable(user.organizationId, branch.id, { tableNumber: 'T2', capacity: 4 }, user.id); // unused table â€” denominator, not numerator
 
     await ReservationService.createReservation(user.organizationId, branch.id, {
       tableIds: [table.id], startAt: hoursFromNow(2), durationMinutes: 90, guestCount: 2, guestName: 'Walk-in',
@@ -312,3 +319,4 @@ describe('AnalyticsService.getOperationalAnalytics', () => {
     expect(analytics.tables.active).toBe(2);
   });
 });
+

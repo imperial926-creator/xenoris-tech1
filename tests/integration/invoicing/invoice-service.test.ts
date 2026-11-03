@@ -70,9 +70,11 @@ describe('InvoiceService', () => {
     const invoice = await InvoiceService.issueInvoice(user.organizationId, branch.id, order.id, user.id);
     expect(invoice.invoiceNumber).toBe('INV-000001');
     expect(invoice.status).toBe('ISSUED');
-    expect(invoice.total.toString()).toBe('168.00');
+    expect(invoice.total.toFixed(2)).toBe('168.00');
     expect(invoice.items).toHaveLength(1);
-    expect(invoice.items[0].nameSnapshot).toBe('Burger');
+    const invoiceItem = invoice.items[0];
+    if (!invoiceItem) throw new Error('Expected an invoice line item');
+    expect(invoiceItem.nameSnapshot).toBe('Burger');
   });
 
   it('numbers sequentially across multiple orders in the same branch', async () => {

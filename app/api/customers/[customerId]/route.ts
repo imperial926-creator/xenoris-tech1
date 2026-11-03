@@ -6,7 +6,8 @@ import { toErrorResponse } from '@/lib/utils/api-error';
 import { updateCustomerSchema } from '@/lib/validation/crm';
 import { CustomerService } from '@/services/crm/CustomerService';
 
-export async function GET(_request: NextRequest, { params }: { params: { customerId: string } }) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ customerId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_VIEW);
     const customer = await CustomerService.get(session.organizationId, params.customerId);
@@ -16,7 +17,8 @@ export async function GET(_request: NextRequest, { params }: { params: { custome
   }
 }
 
-export async function PATCH(request: NextRequest, { params }: { params: { customerId: string } }) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ customerId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
     const body = await request.json();

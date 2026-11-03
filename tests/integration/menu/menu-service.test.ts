@@ -37,7 +37,7 @@ describe('MenuService', () => {
       user.id,
     );
     expect(item.categoryId).toBe(category.id);
-    expect(item.price.toString()).toBe('199.00');
+    expect(item.price.toFixed(2)).toBe('199.00');
   });
 
   it('rejects a duplicate category name within the same organization', async () => {
@@ -76,7 +76,7 @@ describe('MenuService', () => {
       { name: 'Large', price: '249.00', displayOrder: 0 },
       user.id,
     );
-    expect(variant.price.toString()).toBe('249.00');
+    expect(variant.price.toFixed(2)).toBe('249.00');
   });
 
   it('builds a modifier group with a SINGLE selection type and links it to an item', async () => {
@@ -97,7 +97,9 @@ describe('MenuService', () => {
 
     const fullItem = await MenuService.getItem(user.organizationId, item.id);
     expect(fullItem.modifierGroups).toHaveLength(1);
-    expect(fullItem.modifierGroups[0].modifierGroup.modifiers[0].name).toBe('Large');
+    const firstModifier = fullItem.modifierGroups[0]?.modifierGroup.modifiers[0];
+    if (!firstModifier) throw new Error('Expected the Large modifier');
+    expect(firstModifier.name).toBe('Large');
   });
 
   it('rejects linking the same modifier group to an item twice', async () => {

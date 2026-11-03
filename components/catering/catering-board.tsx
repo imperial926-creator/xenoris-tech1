@@ -257,7 +257,9 @@ export function CateringBoard({ branches }: { branches: Branch[] }) {
       return;
     }
     const body: Record<string, string> = { status };
-    if (needsReason) body[needsReason] = reason;
+      if (needsReason !== undefined && reason !== undefined) {
+  body[needsReason] = reason;
+    }
     const res = await fetch(`/api/branches/${branchId}/catering/quotes/${quoteId}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

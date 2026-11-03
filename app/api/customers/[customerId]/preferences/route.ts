@@ -8,7 +8,8 @@ import { CustomerService } from '@/services/crm/CustomerService';
 
 // POST is an upsert-by-key (see CustomerService.setPreference) — posting an
 // existing key updates its value rather than creating a duplicate row.
-export async function POST(request: NextRequest, { params }: { params: { customerId: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ customerId: string }> }) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.CUSTOMER_MANAGE);
     const body = await request.json();

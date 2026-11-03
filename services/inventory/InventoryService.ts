@@ -42,17 +42,44 @@ export class InventoryService {
   // ===========================================================================
   // Units
   // ===========================================================================
-
   static async listUnits(organizationId: string) {
-    return prisma.unit.findMany({ where: { organizationId }, orderBy: { name: 'asc' } });
+    return prisma.unit.findMany({
+      where: { organizationId },
+      orderBy: { name: 'asc' },
+    });
   }
 
-  static async createUnit(organizationId: string, input: CreateUnitInput, actorUserId: string) {
+  static async createUnit(
+    organizationId: string,
+    input: Omit<CreateUnitInput, 'conversionFactor'> & {
+      conversionFactor?: string;
+    },
+    actorUserId: string,
+  ) {
+    const conversionFactor = input.conversionFactor ?? '1';
+
     let baseUnit = null;
+
     if (input.baseUnitId) {
-      baseUnit = await prisma.unit.findFirst({ where: { id: input.baseUnitId, organizationId } });
-      if (!baseUnit) throw new NotFoundError('Base unit');
-      assertSingleLevelChain({ id: 'new', baseUnitId: input.baseUnitId, conversionFactor: input.conversionFactor }, baseUnit);
+      baseUnit = await prisma.unit.findFirst({
+        where: {
+          id: input.baseUnitId,
+          organizationId,
+        },
+      });
+
+      if (!baseUnit) {
+        throw new NotFoundError('Base unit');
+      }
+
+      assertSingleLevelChain(
+        {
+          id: 'new',
+          baseUnitId: input.baseUnitId,
+          conversionFactor,
+        },
+        baseUnit,
+      );
     }
 
     return prisma.$transaction(async (tx) => {
@@ -62,27 +89,53 @@ export class InventoryService {
           name: input.name,
           abbreviation: input.abbreviation,
           baseUnitId: input.baseUnitId,
-          conversionFactor: input.conversionFactor,
+          conversionFactor,
         },
       });
+
       await writeAuditLog(tx, {
-        organizationId, userId: actorUserId,
-        action: 'unit.create', entityType: 'Unit', entityId: unit.id, newValue: unit,
+        organizationId,
+        userId: actorUserId,
+        action: 'unit.create',
+        entityType: 'Unit',
+        entityId: unit.id,
+        newValue: unit,
       });
+
       return unit;
     });
   }
 
-  static async updateUnit(organizationId: string, unitId: string, input: UpdateUnitInput, actorUserId: string) {
-    const existing = await prisma.unit.findFirst({ where: { id: unitId, organizationId } });
-    if (!existing) throw new NotFoundError('Unit');
+  static async updateUnit(
+    organizationId: string,
+    unitId: string,
+    input: UpdateUnitInput,
+    actorUserId: string,
+  ) {
+    const existing = await prisma.unit.findFirst({
+      where: { id: unitId, organizationId },
+    });
+
+    if (!existing) {
+      throw new NotFoundError('Unit');
+    }
 
     return prisma.$transaction(async (tx) => {
-      const unit = await tx.unit.update({ where: { id: unitId }, data: input });
-      await writeAuditLog(tx, {
-        organizationId, userId: actorUserId,
-        action: 'unit.update', entityType: 'Unit', entityId: unit.id, previousValue: existing, newValue: unit,
+      const unit = await tx.unit.update({
+        where: { id: unitId },
+        data: input,
       });
+
+      await writeAuditLog(tx, {
+        organizationId,
+        userId: actorUserId,
+        action: 'unit.update',
+        entityType: 'Unit',
+        entityId: unit.id,
+        previousValue: existing,
+        newValue: unit,
+      });
+
       return unit;
     });
   }
@@ -111,9 +164,14 @@ export class InventoryService {
     return ingredient;
   }
 
-  static async createIngredient(organizationId: string, input: CreateIngredientInput, actorUserId: string) {
-    const unit = await prisma.unit.findFirst({ where: { id: input.stockUnitId, organizationId } });
-    if (!unit) throw new NotFoundError('Unit');
+  static async createIngredient(
+  organizationId: string,
+  input: Omit<CreateIngredientInput, 'costPerUnit'> & {
+    costPerUnit?: string;
+  },
+  actorUserId: string,
+) {
+  const costPerUnit = input.costPerUnit ?? '0';
 
     return prisma.$transaction(async (tx) => {
       const ingredient = await tx.ingredient.create({
@@ -121,7 +179,7 @@ export class InventoryService {
           organizationId,
           name: input.name,
           stockUnitId: input.stockUnitId,
-          costPerUnit: input.costPerUnit,
+          costPerUnit,
         },
       });
       await writeAuditLog(tx, {
@@ -516,8 +574,19 @@ export class InventoryService {
   }
 
   static async createSupplier(organizationId: string, input: CreateSupplierInput, actorUserId: string) {
-    const existing = await prisma.supplier.findUnique({ where: { organizationId_name: { organizationId, name: input.name } } });
-    if (existing) throw new ConflictError(`A supplier named "${input.name}" already exists.`);
+    
+const existing = await prisma.supplier.findFirst({
+  where: {
+    organizationId,
+    name: input.name,
+    active: true,
+  },
+});
+if (existing) {
+  throw new ConflictError(
+    `A supplier named "${input.name}" already exists.`,
+  );
+}
 
     return prisma.$transaction(async (tx) => {
       const supplier = await tx.supplier.create({ data: { organizationId, ...input } });

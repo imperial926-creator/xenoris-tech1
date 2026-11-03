@@ -18,22 +18,35 @@ export class MenuService {
   static async listCategories(organizationId: string) {
     return prisma.menuCategory.findMany({
       where: { organizationId },
-      orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+      orderBy: { name: 'asc' },
     });
   }
 
+  
   static async createCategory(
     organizationId: string,
     input: CreateMenuCategoryInput,
     actorUserId: string,
   ) {
-    const existing = await prisma.menuCategory.findUnique({
-      where: { organizationId_name: { organizationId, name: input.name } },
+    const existing = await prisma.menuCategory.findFirst({
+      where: {
+        organizationId,
+        name: input.name,
+        active: true,
+      },
     });
-    if (existing) throw new ConflictError(`A category named "${input.name}" already exists.`);
+
+    if (existing) {
+      throw new ConflictError(
+        `A category named "${input.name}" already exists.`,
+      );
+    }
 
     return prisma.$transaction(async (tx) => {
-      const category = await tx.menuCategory.create({ data: { organizationId, ...input } });
+      const category = await tx.menuCategory.create({
+        data: { organizationId, ...input },
+      });
+
       await writeAuditLog(tx, {
         organizationId,
         userId: actorUserId,
@@ -42,9 +55,11 @@ export class MenuService {
         entityId: category.id,
         newValue: category,
       });
+
       return category;
     });
   }
+
 
   static async updateCategory(
     organizationId: string,

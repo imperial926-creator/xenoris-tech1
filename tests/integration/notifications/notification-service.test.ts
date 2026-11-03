@@ -275,7 +275,9 @@ describe('NotificationService — wired into existing call sites', () => {
     await DeliveryService.updateStatus(user.organizationId, branch.id, deliveryOrderId, { status: 'PICKED_UP' }, user.id);
     const rows = await notificationsFor(user.organizationId, 'DeliveryOrder', deliveryOrderId);
     expect(rows).toHaveLength(2);
-    expect(rows[0].type).toBe('DELIVERY_UPDATE');
+    const firstNotification = rows[0];
+    if (!firstNotification) throw new Error('Expected a delivery update notification');
+    expect(firstNotification.type).toBe('DELIVERY_UPDATE');
     expect(rows.find((r) => r.channel === 'SMS')!.recipient).toBe('+639170000000');
   });
 

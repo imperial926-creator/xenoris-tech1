@@ -85,20 +85,22 @@ describe('DeliveryOrder auto-creation on OrderService.createOrder', () => {
     // Burger 150.00 x1 -> subtotal 150.00, 12% VAT = 18.00, + 50.00 delivery
     // fee -> total 218.00. Exact assertion, mirroring the migration smoke
     // test's 228.00 example.
-    expect(order.subtotal.toString()).toBe('150.00');
-    expect(order.taxTotal.toString()).toBe('18.00');
-    expect(order.deliveryFee.toString()).toBe('50.00');
-    expect(order.total.toString()).toBe('218.00');
+    expect(order.subtotal.toFixed(2)).toBe('150.00');
+    expect(order.taxTotal.toFixed(2)).toBe('18.00');
+    expect(order.deliveryFee.toFixed(2)).toBe('50.00');
+    expect(order.total.toFixed(2)).toBe('218.00');
 
     expect(order.delivery).toBeTruthy();
     expect(order.delivery?.status).toBe('UNASSIGNED');
     expect(order.delivery?.deliveryZoneId).toBe(zone.id);
-    expect(order.delivery?.deliveryFee.toString()).toBe('50.00');
+    expect(order.delivery?.deliveryFee.toFixed(2)).toBe('50.00');
 
     const history = await DeliveryService.getStatusHistory(user.organizationId, branch.id, order.delivery!.id);
     expect(history).toHaveLength(1);
-    expect(history[0].toStatus).toBe('UNASSIGNED');
-    expect(history[0].fromStatus).toBeNull();
+    const firstHistoryEntry = history[0];
+    if (!firstHistoryEntry) throw new Error('Expected a delivery status history entry');
+    expect(firstHistoryEntry.toStatus).toBe('UNASSIGNED');
+    expect(firstHistoryEntry.fromStatus).toBeNull();
   });
 
   it('does not create a DeliveryOrder for a non-DELIVERY order', async () => {
@@ -109,13 +111,13 @@ describe('DeliveryOrder auto-creation on OrderService.createOrder', () => {
       user.id,
     );
     expect(order.delivery).toBeNull();
-    expect(order.deliveryFee.toString()).toBe('0.00');
+    expect(order.deliveryFee.toFixed(2)).toBe('0.00');
   });
 
-  it('allows a DELIVERY order with no zone yet — deliveryFee stays 0', async () => {
+  it('allows a DELIVERY order with no zone yet â€” deliveryFee stays 0', async () => {
     const { user, branch, item } = await setupFixture('c');
     const order = await createDeliveryOrder(user, branch, item);
-    expect(order.deliveryFee.toString()).toBe('0.00');
+    expect(order.deliveryFee.toFixed(2)).toBe('0.00');
     expect(order.delivery?.deliveryZoneId).toBeNull();
   });
 
@@ -149,7 +151,9 @@ describe('DeliveryService.assignDriver', () => {
 
     const assignments = await prisma.driverAssignment.findMany({ where: { deliveryOrderId: order.delivery!.id } });
     expect(assignments).toHaveLength(1);
-    expect(assignments[0].unassignedAt).toBeNull();
+    const firstAssignment = assignments[0];
+    if (!firstAssignment) throw new Error('Expected a driver assignment');
+    expect(firstAssignment.unassignedAt).toBeNull();
   });
 
   it('reassigning to a different driver closes the prior assignment and opens exactly one new one', async () => {
@@ -171,10 +175,15 @@ describe('DeliveryService.assignDriver', () => {
       orderBy: { assignedAt: 'asc' },
     });
     expect(assignments).toHaveLength(2);
-    expect(assignments[0].driverId).toBe(driver1.id);
-    expect(assignments[0].unassignedAt).not.toBeNull();
-    expect(assignments[1].driverId).toBe(driver2.id);
-    expect(assignments[1].unassignedAt).toBeNull();
+    const firstAssignment = assignments[0];
+    const secondAssignment = assignments[1];
+    if (!firstAssignment || !secondAssignment) {
+      throw new Error('Expected two driver assignments after reassignment');
+    }
+    expect(firstAssignment.driverId).toBe(driver1.id);
+    expect(firstAssignment.unassignedAt).not.toBeNull();
+    expect(secondAssignment.driverId).toBe(driver2.id);
+    expect(secondAssignment.unassignedAt).toBeNull();
 
     const openAssignments = assignments.filter((a) => a.unassignedAt === null);
     expect(openAssignments).toHaveLength(1);
@@ -304,11 +313,15 @@ describe('DeliveryService.myDeliveries', () => {
 
     const driver1Deliveries = await DeliveryService.myDeliveries(user.organizationId, driverUser1.id);
     expect(driver1Deliveries).toHaveLength(1);
-    expect(driver1Deliveries[0].id).toBe(orderForDriver1.delivery!.id);
+    const driver1Delivery = driver1Deliveries[0];
+    if (!driver1Delivery) throw new Error('Expected a delivery for driver 1');
+    expect(driver1Delivery.id).toBe(orderForDriver1.delivery!.id);
 
     const driver2Deliveries = await DeliveryService.myDeliveries(user.organizationId, driverUser2.id);
     expect(driver2Deliveries).toHaveLength(1);
-    expect(driver2Deliveries[0].id).toBe(orderForDriver2.delivery!.id);
+    const driver2Delivery = driver2Deliveries[0];
+    if (!driver2Delivery) throw new Error('Expected a delivery for driver 2');
+    expect(driver2Delivery.id).toBe(orderForDriver2.delivery!.id);
   });
 
   it('throws NotFoundError for a user with no driver profile', async () => {

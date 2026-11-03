@@ -8,8 +8,9 @@ import { ReservationService } from '@/services/reservations/ReservationService';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; reservationId: string } },
+  props: { params: Promise<{ id: string; reservationId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.RESERVATION_MANAGE);
     const body = await request.json();

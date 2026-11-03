@@ -8,8 +8,9 @@ import { DeliveryService } from '@/services/delivery/DeliveryService';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string; deliveryId: string } },
+  props: { params: Promise<{ id: string; deliveryId: string }> }
 ) {
+  const params = await props.params;
   try {
     const session = await requirePermission(await getSession(), PERMISSIONS.DELIVERY_MANAGE);
     const body = await request.json();

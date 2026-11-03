@@ -36,12 +36,14 @@ describe('DeliveryZoneService', () => {
       user.organizationId, branch.id, { name: 'Downtown', deliveryFee: '50.00' }, user.id,
     );
     expect(zone.name).toBe('Downtown');
-    expect(zone.deliveryFee.toString()).toBe('50.00');
+    expect(zone.deliveryFee.toFixed(2)).toBe('50.00');
     expect(zone.active).toBe(true);
 
     const zones = await DeliveryZoneService.list(user.organizationId, branch.id);
     expect(zones).toHaveLength(1);
-    expect(zones[0].id).toBe(zone.id);
+    const listedZone = zones[0];
+    if (!listedZone) throw new Error('Expected a delivery zone');
+    expect(listedZone.id).toBe(zone.id);
   });
 
   it('rejects a duplicate zone name within the same branch', async () => {
