@@ -52,6 +52,7 @@ RUN npm run build
 FROM node:24-bookworm-slim AS runner
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN npm install --global prisma@5.18.0
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
