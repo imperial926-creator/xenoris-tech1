@@ -21,14 +21,16 @@
 # run once, before the new image's containers start receiving traffic.
 
 # ---- deps: install once, reused by the builder stage -----------------------
-FROM node:24-alpine AS deps
+FROM node:24-bookworm-slim AS deps
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 RUN npm ci
 
 # ---- builder: generate the Prisma client and produce the standalone build --
-FROM node:24-alpine AS builder
+FROM node:24-bookworm-slim AS builder
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Needed at build time because Next.js statically analyzes route handlers
@@ -47,8 +49,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ---- runner: minimal production image --------------------------------------
-FROM node:24-alpine AS runner
+FROM node:24-bookworm-slim AS runner
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
